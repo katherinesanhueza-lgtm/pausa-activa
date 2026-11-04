@@ -1,0 +1,23 @@
+{
+  "name": "pausa-activa",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:client": "vite",
+    "dev:server": "node --watch server/index.js",
+    "start": "node server/index.js",
+    "test": "node --test server/*.test.js",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "engines": { "node": ">=24.0.0" },
+  "dependencies": {
+    "vue": "^3.5.44"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.10",
+    "vite": "^8.3.4"
+  }
+}
