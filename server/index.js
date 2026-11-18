@@ -68,7 +68,13 @@ db.exec(`CREATE TABLE IF NOT EXISTS routine_shares (
   teacher_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   PRIMARY KEY (routine_id, teacher_id)
 )`)
-for (const [name, definition] of [['course', "TEXT NOT NULL DEFAULT ''"], ['intensity', "TEXT NOT NULL DEFAULT 'Media'"]]) {
+// can_edit: 1 si el invitado también puede editar la rutina (colaborador).
+if (!db.prepare('PRAGMA table_info(routine_shares)').all().some(c => c.name === 'can_edit')) {
+  db.exec('ALTER TABLE routine_shares ADD COLUMN can_edit INTEGER NOT NULL DEFAULT 0')
+}
+// copied_from: id de la rutina original; copied_credit: «Título» de Autor, guardado al copiar
+// para conservar el crédito aunque la original se elimine después.
+for (const [name, definition] of [['course', "TEXT NOT NULL DEFAULT ''"], ['intensity', "TEXT NOT NULL DEFAULT 'Media'"], ['copied_from', 'TEXT'], ['copied_credit', 'TEXT']]) {
  if (!db.prepare('PRAGMA table_info(routines)').all().some(c => c.name === name)) db.exec('ALTER TABLE routines ADD COLUMN ' + name + ' ' + definition)
 }
 // Preserve a stable reporting identity when an account is deleted.
@@ -346,15 +352,18 @@ async function api(req, res, url) {
   if (path === '/api/routines' && req.method === 'GET') {
     // Cada usuario ve: las públicas, las suyas, las que le compartieron y (si es admin) todas.
     const routines = db.prepare(`SELECT r.*,u.name AS teacher_name,u.school,
-      EXISTS(SELECT 1 FROM routine_shares s WHERE s.routine_id=r.id AND s.teacher_id=?) AS shared_with_me
+      EXISTS(SELECT 1 FROM routine_shares s WHERE s.routine_id=r.id AND s.teacher_id=?) AS shared_with_me,
+      EXISTS(SELECT 1 FROM routine_shares s WHERE s.routine_id=r.id AND s.teacher_id=? AND s.can_edit=1) AS editor
       FROM routines r JOIN users u ON u.id=r.teacher_id
       WHERE r.shared=1 OR r.teacher_id=? OR ?='admin' OR EXISTS(SELECT 1 FROM routine_shares s WHERE s.routine_id=r.id AND s.teacher_id=?)
-      ORDER BY r.updated_at DESC,r.rowid DESC`).all(user.id, user.id, user.role, user.id)
-    const sharesOf = db.prepare('SELECT s.teacher_id,u.name,u.school FROM routine_shares s JOIN users u ON u.id=s.teacher_id WHERE s.routine_id=? ORDER BY u.name')
-    return send(res, 200, { routines: routines.map(r => ({
+      ORDER BY r.updated_at DESC,r.rowid DESC`).all(user.id, user.id, user.id, user.role, user.id)
+    const sharesOf = db.prepare('SELECT s.teacher_id,s.can_edit,u.name,u.school FROM routine_shares s JOIN users u ON u.id=s.teacher_id WHERE s.routine_id=? ORDER BY u.name')
+    return send(res, 200, { routines: routines.map(({ editor, ...r }) => ({
       ...r, sections: JSON.parse(r.sections), shared: !!r.shared, shared_with_me: !!r.shared_with_me,
+      // can_edit: el autor, el admin o un invitado con permiso de edición.
+      can_edit: r.teacher_id === user.id || user.role === 'admin' || !!editor,
       // Solo el autor y el administrador ven la lista de docentes invitados.
-      shared_with: r.teacher_id === user.id || user.role === 'admin' ? sharesOf.all(r.id) : [],
+      shared_with: r.teacher_id === user.id || user.role === 'admin' ? sharesOf.all(r.id).map(s => ({ ...s, can_edit: !!s.can_edit })) : [],
     })) })
   }
   const routineId = path.match(/^\/api\/routines\/([\w-]+)$/)?.[1]
@@ -368,22 +377,39 @@ async function api(req, res, url) {
   }
   if ((path === '/api/routines' && req.method === 'POST') || (routineId && req.method === 'PUT')) {
     if (!['teacher','admin'].includes(user.role)) fail(403, 'No puedes crear rutinas.')
-    let ownerId = user.id
+    let ownerId = user.id, existing = null, collaborator = false
     if (routineId) {
-      const existing = db.prepare('SELECT * FROM routines WHERE id=?').get(routineId)
+      existing = db.prepare('SELECT * FROM routines WHERE id=?').get(routineId)
       if (!existing) fail(404, 'Rutina no encontrada.')
-      if (existing.teacher_id !== user.id && user.role !== 'admin') fail(403, 'Solo puedes editar tus propias rutinas.')
+      // Un invitado con can_edit=1 puede editar la rutina compartida (colaborador).
+      collaborator = existing.teacher_id !== user.id && user.role !== 'admin' &&
+        !!db.prepare('SELECT 1 FROM routine_shares WHERE routine_id=? AND teacher_id=? AND can_edit=1').get(routineId, user.id)
+      if (existing.teacher_id !== user.id && user.role !== 'admin' && !collaborator) fail(403, 'Solo puedes editar tus propias rutinas o las que te compartieron con permiso de edición.')
       ownerId = existing.teacher_id
     }
     const body = await json(req)
-    // shared_with: lista de ids de docentes invitados. Si no viene, se conserva la lista actual.
+    // shared_with: docentes invitados, como ids (solo ver) o {teacher_id, can_edit}.
+    // Si no viene, se conserva la lista actual. Un colaborador no puede cambiarla.
     let sharedWith = null
-    if (body.shared_with !== undefined) {
+    if (body.shared_with !== undefined && !collaborator) {
       if (!Array.isArray(body.shared_with) || body.shared_with.length > 50) fail(400, 'Puedes compartir con hasta 50 profesores.')
-      sharedWith = [...new Set(body.shared_with)]
-      for (const teacherId of sharedWith) {
+      const unique = new Map()
+      for (const entry of body.shared_with) {
+        const teacherId = typeof entry === 'string' ? entry : entry?.teacher_id
         if (typeof teacherId !== 'string' || teacherId === ownerId || !db.prepare("SELECT id FROM users WHERE id=? AND role='teacher'").get(teacherId)) fail(400, 'Uno de los profesores seleccionados no está disponible.')
+        unique.set(teacherId, typeof entry === 'object' && entry.can_edit === true)
       }
+      sharedWith = [...unique].map(([teacherId, canEdit]) => ({ teacherId, canEdit }))
+    }
+    // Copia (fork): se guarda de qué rutina viene y el crédito, calculado en el servidor.
+    let copiedFrom = null, copiedCredit = null
+    if (!routineId && body.copied_from !== undefined) {
+      const original = db.prepare(`SELECT r.id,r.title,r.teacher_id,r.shared,u.name FROM routines r JOIN users u ON u.id=r.teacher_id WHERE r.id=?`).get(String(body.copied_from))
+      const canSee = original && (original.shared || original.teacher_id === user.id || user.role === 'admin' ||
+        db.prepare('SELECT 1 FROM routine_shares WHERE routine_id=? AND teacher_id=?').get(original.id, user.id))
+      if (!canSee) fail(400, 'La rutina original no está disponible.')
+      copiedFrom = original.id
+      copiedCredit = `«${original.title}» de ${original.name}`
     }
     const course = text(body.course || '', 'Curso', 100, 0)
     const intensity = body.intensity || 'Media'
@@ -392,6 +418,8 @@ async function api(req, res, url) {
     const description = text(body.description || '', 'Descripción', 2000, 0)
     if (!['Sesiones', 'Bloques', 'Días'].includes(body.organization)) fail(400, 'Selecciona una organización válida.')
     if (typeof body.shared !== 'boolean') fail(400, 'Selecciona la visibilidad de la rutina.')
+    // La visibilidad (pública o privada) solo la decide el autor o el admin.
+    const shared = collaborator ? !!existing.shared : body.shared
     if (!Array.isArray(body.sections) || !body.sections.length || body.sections.length > 20) fail(400, 'Agrega entre 1 y 20 secciones.')
     const sections = body.sections.map(section => {
       const name = text(section.name, 'Nombre de sección', 100)
@@ -403,14 +431,14 @@ async function api(req, res, url) {
       }) }
     })
     const id = routineId || randomUUID()
-    if (routineId) db.prepare('UPDATE routines SET title=?,description=?,organization=?,sections=?,shared=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(title, description, body.organization, JSON.stringify(sections), Number(body.shared), id)
-    else db.prepare('INSERT INTO routines(id,teacher_id,title,description,organization,sections,shared) VALUES(?,?,?,?,?,?,?)').run(id, user.id, title, description, body.organization, JSON.stringify(sections), Number(body.shared))
+    if (routineId) db.prepare('UPDATE routines SET title=?,description=?,organization=?,sections=?,shared=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(title, description, body.organization, JSON.stringify(sections), Number(shared), id)
+    else db.prepare('INSERT INTO routines(id,teacher_id,title,description,organization,sections,shared,copied_from,copied_credit) VALUES(?,?,?,?,?,?,?,?,?)').run(id, user.id, title, description, body.organization, JSON.stringify(sections), Number(shared), copiedFrom, copiedCredit)
     db.prepare('UPDATE routines SET course=?,intensity=? WHERE id=?').run(course,intensity,id)
     if (sharedWith) {
       // Se reemplaza la lista completa de invitados.
       db.prepare('DELETE FROM routine_shares WHERE routine_id=?').run(id)
-      const insert = db.prepare('INSERT INTO routine_shares(routine_id,teacher_id) VALUES(?,?)')
-      for (const teacherId of sharedWith) insert.run(id, teacherId)
+      const insert = db.prepare('INSERT INTO routine_shares(routine_id,teacher_id,can_edit) VALUES(?,?,?)')
+      for (const { teacherId, canEdit } of sharedWith) insert.run(id, teacherId, Number(canEdit))
     }
     return send(res, routineId ? 200 : 201, { id })
   }

@@ -47,3 +47,4 @@ input:not([type=checkbox]),select,textarea{background:#fbfdff;border-color:#c8dc
 .share-picker legend{font-size:12px;font-weight:600;color:#244d62;padding:0 6px}
 .share-list{display:grid;gap:8px;max-height:180px;overflow:auto;margin-top:8px}
 .share-list .checkbox-label{white-space:normal}
+.share-row{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}

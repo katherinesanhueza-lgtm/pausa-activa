@@ -30,14 +30,19 @@ async function load() {
 function edit(r) {
   error.value = ''; notice.value = ''
   draft.value = r ? JSON.parse(JSON.stringify(r)) : { title: '', description: '', organization: 'Sesiones', course: '', intensity: 'Media', shared: false, sections: [{ name: 'Sesión 1', exercises: [] }] }
-  // El servidor entrega objetos {teacher_id, name}; el formulario trabaja solo con los ids.
-  draft.value.shared_with = (r?.shared_with || []).map(s => s.teacher_id)
+  // El formulario solo necesita el id del invitado y si puede editar.
+  draft.value.shared_with = (r?.shared_with || []).map(s => ({ teacher_id: s.teacher_id, can_edit: !!s.can_edit }))
 }
-function copy(r) { edit(r); delete draft.value.id; delete draft.value.teacher_id; draft.value.title = `${r.title.slice(0, 110)} (copia)`; draft.value.shared = false; draft.value.shared_with = []; viewing.value = null }
+// Copia (fork): se envía copied_from y el servidor guarda el crédito al autor original.
+function copy(r) { edit(r); delete draft.value.id; delete draft.value.teacher_id; delete draft.value.copied_credit; draft.value.copied_from = r.id; draft.value.title = `${r.title.slice(0, 110)} (copia)`; draft.value.shared = false; draft.value.shared_with = []; viewing.value = null }
+const shareOf = id => draft.value.shared_with.find(s => s.teacher_id === id)
 function toggleShare(id) {
-  const list = draft.value.shared_with
-  list.includes(id) ? list.splice(list.indexOf(id), 1) : list.push(id)
+  const list = draft.value.shared_with, entry = shareOf(id)
+  entry ? list.splice(list.indexOf(entry), 1) : list.push({ teacher_id: id, can_edit: false })
 }
+function toggleEdit(id) { const entry = shareOf(id); if (entry) entry.can_edit = !entry.can_edit }
+// Colaborador: edita una rutina ajena que le compartieron con permiso de edición.
+const collaborating = computed(() => !!draft.value?.id && draft.value.teacher_id !== props.user.id && props.user.role !== 'admin')
 function move(items, index, offset) { const target = index + offset; if (target >= 0 && target < items.length) [items[index], items[target]] = [items[target], items[index]] }
 async function save() {
   busy.value = true; error.value = ''
@@ -71,10 +76,10 @@ onMounted(async () => {
     <p v-if="loading" class="empty" role="status">Cargando rutinas…</p>
     <div v-else class="routine-feed">
       <article v-for="r in filtered" :key="r.id" class="panel routine-post">
-        <div class="post-author"><span class="avatar">{{ r.teacher_name.slice(0, 2).toUpperCase() }}</span><div><strong>{{ r.teacher_name }}</strong><p class="muted small">{{ r.school }} · {{ r.shared ? 'Pública · Comunidad' : r.shared_with_me ? 'Compartida contigo' : r.shared_with.length ? `Privada · compartida con ${r.shared_with.length} ${r.shared_with.length === 1 ? 'profesor' : 'profesores'}` : 'Privada' }}</p></div><span class="category-tag">{{ r.organization }}</span></div>
-        <h3><button class="title-button" @click="viewing = r">{{ r.title }}</button></h3><p class="routine-description">{{ r.description || 'Una pausa para reconectar y movernos juntos.' }}</p>
+        <div class="post-author"><span class="avatar">{{ r.teacher_name.slice(0, 2).toUpperCase() }}</span><div><strong>{{ r.teacher_name }}</strong><p class="muted small">{{ r.school }} · {{ r.shared ? 'Pública · Comunidad' : r.shared_with_me ? (r.can_edit ? 'Compartida contigo · puedes editar' : 'Compartida contigo') : r.shared_with.length ? `Privada · compartida con ${r.shared_with.length} ${r.shared_with.length === 1 ? 'profesor' : 'profesores'}` : 'Privada' }}</p></div><span class="category-tag">{{ r.organization }}</span></div>
+        <h3><button class="title-button" @click="viewing = r">{{ r.title }}</button></h3><p class="routine-description">{{ r.description || 'Una pausa para reconectar y movernos juntos.' }}</p><p v-if="r.copied_credit" class="muted small">Adaptada de {{ r.copied_credit }}</p>
         <div class="routine-summary"><span>{{ r.course || 'Todos los cursos' }}</span><span>Intensidad {{ r.intensity.toLowerCase() }}</span><span>{{ r.sections.length }} {{ r.organization.toLowerCase() }}</span><span>{{ count(r) }} ejercicios</span><span>{{ total(r) }} min</span></div>
-        <div class="post-actions"><button class="button secondary" @click="viewing = r">Ver rutina</button><button v-if="(r.teacher_id === user.id || user.role === 'admin')" class="text-button" @click="edit(r)">Editar rutina</button><button v-if="(r.teacher_id === user.id || user.role === 'admin')" class="text-button danger" @click="removing = r; error = ''">Eliminar</button><button v-else-if="['teacher','admin'].includes(user.role)" class="text-button" @click="copy(r)">Guardar una copia</button></div>
+        <div class="post-actions"><button class="button secondary" @click="viewing = r">Ver rutina</button><button v-if="r.can_edit" class="text-button" @click="edit(r)">Editar rutina</button><button v-if="(r.teacher_id === user.id || user.role === 'admin')" class="text-button danger" @click="removing = r; error = ''">Eliminar</button><button v-else-if="['teacher','admin'].includes(user.role)" class="text-button" @click="copy(r)">Guardar una copia</button></div>
       </article>
       <div v-if="!filtered.length && !error" class="empty panel"><h3>{{ search ? 'Sin resultados' : mine ? 'Dale forma a tu primera rutina' : 'La comunidad empieza contigo' }}</h3><p>{{ search ? 'Prueba con otro nombre o profesor.' : 'Crea una rutina con ejercicios de la biblioteca y compártela con tus colegas.' }}</p></div>
     </div>
@@ -95,14 +100,21 @@ onMounted(async () => {
         </div>
         <p v-if="!videos.length" class="alert">Primero sube un ejercicio en la Biblioteca de ejercicios.</p>
         <button type="button" class="button secondary" :disabled="draft.sections.length >= 20" @click="draft.sections.push({ name: '', exercises: [] })">+ Agregar sección</button>
-        <fieldset v-if="shareOptions.length" class="share-picker">
-          <legend>Compartir con profesores específicos</legend>
-          <p class="field-hint">La rutina sigue privada, pero los profesores que elijas la verán en «Mis rutinas».</p>
-          <div class="share-list">
-            <label v-for="c in shareOptions" :key="c.id" class="checkbox-label"><input type="checkbox" :checked="draft.shared_with.includes(c.id)" @change="toggleShare(c.id)">{{ c.name }} <span class="muted small">· {{ c.school }}</span></label>
-          </div>
-        </fieldset>
-        <label class="checkbox-label"><input v-model="draft.shared" type="checkbox">Compartir con todos los profesores de la comunidad</label><p class="field-hint">Si no la compartes, será privada. La administración también puede consultarla. Cada profesor puede guardar y adaptar su propia copia.</p>
+        <p v-if="draft.copied_credit || draft.copied_from" class="field-hint">Adaptada de {{ draft.copied_credit || 'otra rutina de la comunidad' }}. El crédito al autor original se conserva.</p>
+        <p v-if="collaborating" class="alert">Estás editando como colaborador una rutina de {{ draft.teacher_name }}. La visibilidad y los invitados los decide su autor.</p>
+        <template v-else>
+          <fieldset v-if="shareOptions.length" class="share-picker">
+            <legend>Compartir con profesores específicos</legend>
+            <p class="field-hint">La rutina sigue privada, pero los profesores que elijas la verán en «Mis rutinas». Marca «puede editar» para armarla en conjunto.</p>
+            <div class="share-list">
+              <div v-for="c in shareOptions" :key="c.id" class="share-row">
+                <label class="checkbox-label"><input type="checkbox" :checked="!!shareOf(c.id)" @change="toggleShare(c.id)">{{ c.name }} <span class="muted small">· {{ c.school }}</span></label>
+                <label class="checkbox-label small"><input type="checkbox" :disabled="!shareOf(c.id)" :checked="!!shareOf(c.id)?.can_edit" @change="toggleEdit(c.id)">Puede editar</label>
+              </div>
+            </div>
+          </fieldset>
+          <label class="checkbox-label"><input v-model="draft.shared" type="checkbox">Compartir con todos los profesores de la comunidad</label><p class="field-hint">Si no la compartes, será privada. La administración también puede consultarla. Cada profesor puede guardar y adaptar su propia copia.</p>
+        </template>
         <p v-if="error" class="alert error" role="alert">{{ error }}</p>
         <div class="modal-actions"><button type="button" class="button secondary" :disabled="busy" @click="draft = null; error = ''">Cancelar</button><button class="button primary" :disabled="busy || !videos.length">{{ busy ? 'Guardando…' : draft.shared ? 'Guardar y compartir' : 'Guardar rutina' }}</button></div>
       </form>
@@ -114,7 +126,7 @@ onMounted(async () => {
       <div class="modal-actions"><button class="button secondary" :disabled="busy" @click="removing = null; error = ''">Cancelar</button><button class="button destructive" :disabled="busy" @click="remove">{{ busy ? 'Eliminando…' : 'Eliminar rutina' }}</button></div>
     </AppDialog>
     <AppDialog v-if="viewing" :title="viewing.title" wide @close="viewing = null; playing = null">
-      <p class="muted">Por {{ viewing.teacher_name }} · {{ total(viewing) }} minutos</p><p class="routine-description">{{ viewing.description }}</p>
+      <p class="muted">Por {{ viewing.teacher_name }} · {{ total(viewing) }} minutos</p><p v-if="viewing.copied_credit" class="muted small">Adaptada de {{ viewing.copied_credit }}</p><p class="routine-description">{{ viewing.description }}</p>
       <div v-for="(section, i) in viewing.sections" :key="i" class="routine-section panel"><h3>{{ section.name }}</h3><div v-for="(exercise, n) in section.exercises" :key="n" class="routine-exercise"><span class="mini-avatar">{{ n + 1 }}</span><div><strong>{{ video(exercise.video_id)?.title || 'Ejercicio no disponible' }}</strong><p class="muted small">{{ video(exercise.video_id)?.description }}</p></div><span>{{ exercise.minutes }} min</span><button v-if="video(exercise.video_id)" class="text-button" @click="playing = video(exercise.video_id)">Ver video</button></div></div>
       <template v-if="playing"><h3>{{ playing.title }}</h3><iframe v-if="embed(playing)" class="video-player" :src="playing.url" :title="playing.title" allowfullscreen /><video v-else class="video-player" :src="playing.filename ? `/api/videos/${playing.id}/file` : playing.url" controls playsinline /></template>
       <div class="modal-actions"><button v-if="viewing.teacher_id !== user.id && ['teacher','admin'].includes(user.role)" class="button primary" @click="copy(viewing)">Guardar y adaptar una copia</button></div>
