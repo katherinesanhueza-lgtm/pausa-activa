@@ -5,6 +5,12 @@ import { mkdirSync, existsSync, statSync, unlinkSync, openSync, writeSync, close
 import { createReadStream } from 'node:fs'
 import { resolve, join, extname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import {
+  createSupabaseSchool, deleteSupabaseAccount, listSupabaseSchools,
+  getSupabaseAuthUser, refreshSupabaseSession, registerSupabaseAccount,
+  revokeSupabaseSession, signInSupabaseAccount, supabaseAuthConfigured,
+  supabaseConfigured, updateSupabaseProfile,
+} from './supabase.js'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const directory = resolve(process.env.DATA_DIR || join(root, 'data'))
@@ -63,17 +69,43 @@ if (!db.prepare('PRAGMA table_info(activity_records)').all().some(column => colu
   db.exec('ALTER TABLE activity_records ADD COLUMN teacher_ref TEXT')
   db.exec('UPDATE activity_records SET teacher_ref=COALESCE(teacher_id,id)')
 }
+if (!db.prepare('PRAGMA table_info(users)').all().some(column => column.name === 'auth_id')) {
+  db.exec('ALTER TABLE users ADD COLUMN auth_id TEXT')
+}
 
 const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Santiago', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
 function dateValue(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString().slice(0, 10) !== value) fail(400, 'Ingresa una fecha válida.')
   return value
 }
-function schoolName(value) {
+async function schoolName(value) {
   const name = text(value, 'Colegio', 150).replace(/\s+/g, ' ')
   const canonical = db.prepare('SELECT name FROM schools WHERE name=? COLLATE NOCASE').get(name)?.name || name
-  db.prepare('INSERT OR IGNORE INTO schools(id,name) VALUES(?,?)').run(randomUUID(), canonical)
-  return canonical
+  if (!supabaseConfigured()) {
+    db.prepare('INSERT OR IGNORE INTO schools(id,name) VALUES(?,?)').run(randomUUID(), canonical)
+    return canonical
+  }
+  const schools = await listSupabaseSchools()
+  const existing = schools.find(school => school.name.toLocaleLowerCase('es') === canonical.toLocaleLowerCase('es'))
+  if (existing) return existing.name
+  try {
+    const created = await createSupabaseSchool(canonical)
+    return created.name
+  } catch (error) {
+    if (error.code !== '23505') throw error
+    const refreshed = await listSupabaseSchools()
+    const concurrent = refreshed.find(school => school.name.toLocaleLowerCase('es') === canonical.toLocaleLowerCase('es'))
+    if (concurrent) return concurrent.name
+    throw error
+  }
+}
+async function syncStoredSchools() {
+  if (!supabaseConfigured()) return
+  const names = new Set([
+    ...db.prepare('SELECT name FROM schools').all().map(row => row.name),
+    ...db.prepare("SELECT DISTINCT school AS name FROM users WHERE school!=''").all().map(row => row.name),
+  ])
+  for (const name of names) await schoolName(name)
 }
 function report(user, url) {
   const from = url.searchParams.get('from') ? dateValue(url.searchParams.get('from')) : '2000-01-01'
@@ -120,7 +152,7 @@ function report(user, url) {
 
 const categories = ['Movimiento', 'Baile', 'Respiración', 'Estiramientos']
 const uploadLimit = 100 * 1024 * 1024
-const publicUser = ({ password, ...user }) => user
+const publicUser = ({ password, auth_id, ...user }) => user
 const digest = value => createHash('sha256').update(value).digest('hex')
 function passwordHash(password) {
   const salt = randomBytes(16).toString('hex')
@@ -154,14 +186,47 @@ function account(body) {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fail(400, 'Ingresa un correo válido.')
   if (typeof body.password !== 'string' || body.password.length < 8 || body.password.length > 128) fail(400, 'La contraseña debe tener entre 8 y 128 caracteres.')
   if (db.prepare('SELECT id FROM users WHERE email = ?').get(email)) fail(409, 'Ya existe una cuenta con ese correo.')
-  return { name, email, password: passwordHash(body.password) }
+  return { name, email, password: passwordHash(supabaseConfigured() ? randomBytes(32).toString('hex') : body.password) }
 }
-function session(req) {
-  const token = req.headers.cookie?.split(';').map(c => c.trim()).find(c => c.startsWith('pausa_session='))?.slice(14)
+function sessionToken(req) {
+  return req.headers.cookie?.split(';').map(c => c.trim()).find(c => c.startsWith('pausa_session='))?.slice(14) || null
+}
+function supabaseTokens(token) {
+  if (!token?.startsWith('supa.')) return null
+  try { return JSON.parse(Buffer.from(token.slice(5), 'base64url').toString()) } catch { return null }
+}
+function setAuthCookie(res, session) {
+  const value = `supa.${Buffer.from(JSON.stringify({ access_token: session.access_token, refresh_token: session.refresh_token }), 'utf8').toString('base64url')}`
+  res.setHeader('Set-Cookie', `pausa_session=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000${process.env.COOKIE_SECURE === 'true' ? '; Secure' : ''}`)
+}
+async function session(req, res) {
+  const token = sessionToken(req)
   if (!token) return null
+  const stored = supabaseTokens(token)
+  if (stored?.access_token && stored?.refresh_token) {
+    let authUser
+    try {
+      authUser = await getSupabaseAuthUser(stored.access_token)
+    } catch (error) {
+      if (error.status !== 401) throw error
+      try {
+        const refreshed = await refreshSupabaseSession(stored.refresh_token)
+        setAuthCookie(res, refreshed)
+        authUser = refreshed.user
+      } catch (refreshError) {
+        if (refreshError.status === 401) return null
+        throw refreshError
+      }
+    }
+    return db.prepare('SELECT * FROM users WHERE auth_id=?').get(authUser.id) || null
+  }
   return db.prepare('SELECT u.* FROM sessions s JOIN users u ON s.user_id=u.id WHERE s.token=? AND s.expires>?').get(digest(token), Date.now()) || null
 }
-function newSession(res, user) {
+function newSession(res, user, authSession = null) {
+  if (authSession?.access_token && authSession?.refresh_token) {
+    setAuthCookie(res, authSession)
+    return
+  }
   db.prepare('DELETE FROM sessions WHERE expires < ?').run(Date.now())
   const token = randomBytes(32).toString('hex')
   db.prepare('INSERT INTO sessions(token,user_id,expires) VALUES(?,?,?)').run(digest(token), user.id, Date.now() + 7 * 86400000)
@@ -206,12 +271,14 @@ async function api(req, res, url) {
     if (db.prepare("SELECT id FROM users WHERE role='admin'").get()) fail(403, 'La escuela ya está configurada.')
     const body = await json(req)
     const data = account(body)
-    const school = schoolName(body.school)
+    const school = await schoolName(body.school)
     // Check again after awaiting the body to prevent concurrent initializations.
     if (db.prepare("SELECT id FROM users WHERE role='admin'").get()) fail(403, 'La escuela ya está configurada.')
-    const user = { id: randomUUID(), ...data, school, role: 'admin' }
-    db.prepare('INSERT INTO users(id,name,email,password,role,school) VALUES(?,?,?,?,?,?)').run(user.id, user.name, user.email, user.password, user.role, school)
-    newSession(res, user)
+    const auth_id = supabaseConfigured() ? await registerSupabaseAccount({ email: data.email, password: body.password, name: data.name, role: 'admin', school }) : null
+    const user = { id: randomUUID(), ...data, auth_id, school, role: 'admin' }
+    db.prepare('INSERT INTO users(id,name,email,password,role,school,auth_id) VALUES(?,?,?,?,?,?,?)').run(user.id, user.name, user.email, user.password, user.role, school, auth_id)
+    const authSession = supabaseConfigured() ? await signInSupabaseAccount(user.email, body.password) : null
+    newSession(res, user, authSession)
     return send(res, 201, { user: publicUser(user) })
   }
   if (path === '/api/login' && req.method === 'POST') {
@@ -220,11 +287,48 @@ async function api(req, res, url) {
     const email = text(body.email, 'Correo', 200).toLowerCase()
     if (typeof body.password !== 'string' || body.password.length > 128) fail(400, 'Contraseña no válida.')
     const user = db.prepare('SELECT * FROM users WHERE email=?').get(email)
+    let authSession = null
+    if (user && passwordMatches(body.password, user.password) && supabaseConfigured() && !user.auth_id) {
+      user.auth_id = await registerSupabaseAccount({ email: user.email, password: body.password, name: user.name, role: user.role, school: user.school })
+      db.prepare('UPDATE users SET auth_id=? WHERE id=?').run(user.auth_id, user.id)
+    }
+    if (user && supabaseConfigured()) {
+      if (!supabaseAuthConfigured()) fail(503, 'Falta SUPABASE_PUBLISHABLE_KEY en .env.')
+      if (!user.auth_id) {
+        if (!passwordMatches(body.password, user.password)) fail(401, 'Correo o contrasena incorrectos.')
+        user.auth_id = await registerSupabaseAccount({ email: user.email, password: body.password, name: user.name, role: user.role, school: user.school })
+      }
+      authSession = await signInSupabaseAccount(user.email, body.password)
+      if (authSession.user?.id !== user.auth_id) fail(401, 'Correo o contrasena incorrectos.')
+      db.prepare('UPDATE users SET auth_id=?,password=? WHERE id=?').run(user.auth_id, passwordHash(randomBytes(32).toString('hex')), user.id)
+      user.password = passwordHash(body.password)
+    }
     if (!user || !passwordMatches(body.password, user.password)) fail(401, 'Correo o contraseña incorrectos.')
-    newSession(res, user)
+    newSession(res, user, authSession)
     return send(res, 200, { user: publicUser(user) })
   }
-  const user = session(req)
+  if (path === '/api/logout' && req.method === 'POST') {
+    const token = sessionToken(req)
+    const stored = supabaseTokens(token)
+    res.setHeader('Set-Cookie', 'pausa_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0')
+    if (stored?.access_token) {
+      try {
+        await revokeSupabaseSession(stored.access_token)
+      } catch (error) {
+        if (error.status !== 401 || !stored.refresh_token) throw error
+        try {
+          const refreshed = await refreshSupabaseSession(stored.refresh_token)
+          await revokeSupabaseSession(refreshed.access_token)
+        } catch (refreshError) {
+          if (refreshError.status !== 401) throw refreshError
+        }
+      }
+    } else if (token) {
+      db.prepare('DELETE FROM sessions WHERE token=?').run(digest(token))
+    }
+    return send(res, 200, { ok: true })
+  }
+  const user = await session(req, res)
   if (!user) fail(401, 'Inicia sesión para continuar.')
   if (path === '/api/me' && req.method === 'GET') return send(res, 200, { user: publicUser(user) })
   if (path === '/api/routines' && req.method === 'GET') {
@@ -284,19 +388,28 @@ async function api(req, res, url) {
     db.prepare('INSERT INTO activity_records(id,teacher_id,teacher_name,teacher_ref,school,minutes,performed_on,video_id) VALUES(?,?,?,?,?,?,?,?)').run(id, teacher.id, teacher.name, teacher.id, teacher.school, body.minutes, date, body.video_id || null)
     return send(res, 201, { id })
   }
-  if (path === '/api/logout' && req.method === 'POST') {
-    const token = req.headers.cookie?.split(';').map(c => c.trim()).find(c => c.startsWith('pausa_session='))?.slice(14)
-    if (token) db.prepare('DELETE FROM sessions WHERE token=?').run(digest(token))
-    res.setHeader('Set-Cookie', 'pausa_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0')
-    return send(res, 200, { ok: true })
+  if (path === '/api/schools' && req.method === 'GET') {
+    if (!supabaseConfigured()) return send(res, 200, { schools: user.role === 'admin' ? db.prepare('SELECT * FROM schools ORDER BY name').all() : db.prepare('SELECT * FROM schools WHERE name=?').all(user.school) })
+    await syncStoredSchools()
+    const schools = await listSupabaseSchools()
+    return send(res, 200, { schools: user.role === 'admin' ? schools : schools.filter(school => school.name === user.school) })
   }
-  if (path === '/api/schools' && req.method === 'GET') return send(res, 200, { schools: user.role === 'admin' ? db.prepare('SELECT * FROM schools ORDER BY name').all() : db.prepare('SELECT * FROM schools WHERE name=?').all(user.school) })
   if (path === '/api/schools' && req.method === 'POST') {
     if (user.role !== 'admin') fail(403, 'Solo el administrador puede crear colegios.')
     const name = text((await json(req)).name, 'Colegio', 150).replace(/\s+/g, ' ')
-    if (db.prepare('SELECT id FROM schools WHERE name=? COLLATE NOCASE').get(name)) fail(409, 'Este colegio ya existe.')
-    const id = randomUUID(); db.prepare('INSERT INTO schools(id,name) VALUES(?,?)').run(id,name)
-    return send(res, 201, { id, name })
+    if (!supabaseConfigured()) {
+      if (db.prepare('SELECT id FROM schools WHERE name=? COLLATE NOCASE').get(name)) fail(409, 'Este colegio ya existe.')
+      const id = randomUUID(); db.prepare('INSERT INTO schools(id,name) VALUES(?,?)').run(id,name)
+      return send(res, 201, { id, name })
+    }
+    if ((await listSupabaseSchools()).some(school => school.name.toLocaleLowerCase('es') === name.toLocaleLowerCase('es'))) fail(409, 'Este colegio ya existe.')
+    try {
+      const school = await createSupabaseSchool(name)
+      return send(res, 201, school)
+    } catch (error) {
+      if (error.code === '23505') fail(409, 'Este colegio ya existe.')
+      throw error
+    }
   }
   if (path === '/api/users') {
     if (user.role !== 'admin') fail(403, 'Solo el administrador puede gestionar usuarios.')
@@ -304,8 +417,9 @@ async function api(req, res, url) {
     if (req.method === 'POST') {
       const body = await json(req), data = account(body)
       if (!['admin','teacher','school'].includes(body.role)) fail(400, 'Perfil no válido.')
-      const school = schoolName(body.school), id = randomUUID()
-      db.prepare('INSERT INTO users(id,name,email,password,role,school) VALUES(?,?,?,?,?,?)').run(id,data.name,data.email,data.password,body.role,school)
+      const school = await schoolName(body.school), id = randomUUID()
+      const auth_id = supabaseConfigured() ? await registerSupabaseAccount({ email: data.email, password: body.password, name: data.name, role: body.role, school }) : null
+      db.prepare('INSERT INTO users(id,name,email,password,role,school,auth_id) VALUES(?,?,?,?,?,?,?)').run(id,data.name,data.email,data.password,body.role,school,auth_id)
       return send(res, 201, { id })
     }
   }
@@ -318,23 +432,27 @@ async function api(req, res, url) {
     if (path === '/api/teachers' && req.method === 'POST') {
       const body = await json(req)
       const data = account(body)
-      const school = body.school === undefined ? user.school : schoolName(body.school)
+      const school = body.school === undefined ? user.school : await schoolName(body.school)
       const id = randomUUID()
-      db.prepare('INSERT INTO users(id,name,email,password,role,school) VALUES(?,?,?,?,?,?)').run(id, data.name, data.email, data.password, 'teacher', school)
+      const auth_id = supabaseConfigured() ? await registerSupabaseAccount({ email: data.email, password: body.password, name: data.name, role: 'teacher', school }) : null
+      db.prepare('INSERT INTO users(id,name,email,password,role,school,auth_id) VALUES(?,?,?,?,?,?,?)').run(id, data.name, data.email, data.password, 'teacher', school, auth_id)
       return send(res, 201, { teacher: { id, name: data.name, email: data.email, school, video_count: 0, session_count: 0, minutes: 0 } })
     }
     const id = path.match(/^\/api\/teachers\/([\w-]+)$/)?.[1]
     if (id && req.method === 'PATCH') {
       const body = await json(req)
       const name = text(body.name, 'Nombre', 100)
-      const school = schoolName(body.school)
+      const school = await schoolName(body.school)
+      const profile = db.prepare("SELECT auth_id FROM users WHERE id=? AND role='teacher'").get(id)
+      if (profile?.auth_id && supabaseConfigured()) await updateSupabaseProfile(profile.auth_id, { name, role: 'teacher', school })
       const result = db.prepare("UPDATE users SET name=?,school=? WHERE id=? AND role='teacher'").run(name, school, id)
       if (!result.changes) fail(404, 'Docente no encontrado.')
       return send(res, 200, { ok: true })
     }
     if (id && req.method === 'DELETE') {
-      const teacher = db.prepare("SELECT id FROM users WHERE id=? AND role='teacher'").get(id)
+      const teacher = db.prepare("SELECT id,auth_id FROM users WHERE id=? AND role='teacher'").get(id)
       if (!teacher) fail(404, 'Docente no encontrado.')
+      if (teacher.auth_id && supabaseConfigured()) await deleteSupabaseAccount(teacher.auth_id)
       const files = db.prepare('SELECT filename FROM videos WHERE teacher_id=?').all(id)
       db.prepare('DELETE FROM users WHERE id=?').run(id)
       for (const file of files) removeFile(file.filename)

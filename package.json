@@ -4,10 +4,11 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "node scripts/dev.mjs",
+    "dev": "node --env-file-if-exists=.env scripts/dev.mjs",
     "dev:client": "vite",
-    "dev:server": "node --watch server/index.js",
-    "start": "node server/index.js",
+    "dev:server": "node --env-file-if-exists=.env --watch server/index.js",
+    "start": "node --env-file-if-exists=.env server/index.js",
+    "check:supabase": "node --env-file-if-exists=.env scripts/check-supabase.mjs",
     "test": "node --test server/*.test.js",
     "build": "vite build",
     "preview": "vite preview"
