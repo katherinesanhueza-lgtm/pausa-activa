@@ -7,7 +7,8 @@ import { resolve, join, extname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   createSupabaseSchool, deleteSupabaseAccount, listSupabaseSchools,
-  registerSupabaseAccount, signInSupabaseAccount, supabaseAuthConfigured,
+  getSupabaseAuthUser, refreshSupabaseSession, registerSupabaseAccount,
+  revokeSupabaseSession, signInSupabaseAccount, supabaseAuthConfigured,
   supabaseConfigured, updateSupabaseProfile,
 } from './supabase.js'
 
@@ -187,12 +188,45 @@ function account(body) {
   if (db.prepare('SELECT id FROM users WHERE email = ?').get(email)) fail(409, 'Ya existe una cuenta con ese correo.')
   return { name, email, password: passwordHash(supabaseConfigured() ? randomBytes(32).toString('hex') : body.password) }
 }
-function session(req) {
-  const token = req.headers.cookie?.split(';').map(c => c.trim()).find(c => c.startsWith('pausa_session='))?.slice(14)
+function sessionToken(req) {
+  return req.headers.cookie?.split(';').map(c => c.trim()).find(c => c.startsWith('pausa_session='))?.slice(14) || null
+}
+function supabaseTokens(token) {
+  if (!token?.startsWith('supa.')) return null
+  try { return JSON.parse(Buffer.from(token.slice(5), 'base64url').toString()) } catch { return null }
+}
+function setAuthCookie(res, session) {
+  const value = `supa.${Buffer.from(JSON.stringify({ access_token: session.access_token, refresh_token: session.refresh_token }), 'utf8').toString('base64url')}`
+  res.setHeader('Set-Cookie', `pausa_session=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000${process.env.COOKIE_SECURE === 'true' ? '; Secure' : ''}`)
+}
+async function session(req, res) {
+  const token = sessionToken(req)
   if (!token) return null
+  const stored = supabaseTokens(token)
+  if (stored?.access_token && stored?.refresh_token) {
+    let authUser
+    try {
+      authUser = await getSupabaseAuthUser(stored.access_token)
+    } catch (error) {
+      if (error.status !== 401) throw error
+      try {
+        const refreshed = await refreshSupabaseSession(stored.refresh_token)
+        setAuthCookie(res, refreshed)
+        authUser = refreshed.user
+      } catch (refreshError) {
+        if (refreshError.status === 401) return null
+        throw refreshError
+      }
+    }
+    return db.prepare('SELECT * FROM users WHERE auth_id=?').get(authUser.id) || null
+  }
   return db.prepare('SELECT u.* FROM sessions s JOIN users u ON s.user_id=u.id WHERE s.token=? AND s.expires>?').get(digest(token), Date.now()) || null
 }
-function newSession(res, user) {
+function newSession(res, user, authSession = null) {
+  if (authSession?.access_token && authSession?.refresh_token) {
+    setAuthCookie(res, authSession)
+    return
+  }
   db.prepare('DELETE FROM sessions WHERE expires < ?').run(Date.now())
   const token = randomBytes(32).toString('hex')
   db.prepare('INSERT INTO sessions(token,user_id,expires) VALUES(?,?,?)').run(digest(token), user.id, Date.now() + 7 * 86400000)
@@ -243,7 +277,8 @@ async function api(req, res, url) {
     const auth_id = supabaseConfigured() ? await registerSupabaseAccount({ email: data.email, password: body.password, name: data.name, role: 'admin', school }) : null
     const user = { id: randomUUID(), ...data, auth_id, school, role: 'admin' }
     db.prepare('INSERT INTO users(id,name,email,password,role,school,auth_id) VALUES(?,?,?,?,?,?,?)').run(user.id, user.name, user.email, user.password, user.role, school, auth_id)
-    newSession(res, user)
+    const authSession = supabaseConfigured() ? await signInSupabaseAccount(user.email, body.password) : null
+    newSession(res, user, authSession)
     return send(res, 201, { user: publicUser(user) })
   }
   if (path === '/api/login' && req.method === 'POST') {
@@ -252,6 +287,7 @@ async function api(req, res, url) {
     const email = text(body.email, 'Correo', 200).toLowerCase()
     if (typeof body.password !== 'string' || body.password.length > 128) fail(400, 'Contraseña no válida.')
     const user = db.prepare('SELECT * FROM users WHERE email=?').get(email)
+    let authSession = null
     if (user && passwordMatches(body.password, user.password) && supabaseConfigured() && !user.auth_id) {
       user.auth_id = await registerSupabaseAccount({ email: user.email, password: body.password, name: user.name, role: user.role, school: user.school })
       db.prepare('UPDATE users SET auth_id=? WHERE id=?').run(user.auth_id, user.id)
@@ -262,16 +298,37 @@ async function api(req, res, url) {
         if (!passwordMatches(body.password, user.password)) fail(401, 'Correo o contrasena incorrectos.')
         user.auth_id = await registerSupabaseAccount({ email: user.email, password: body.password, name: user.name, role: user.role, school: user.school })
       }
-      const auth = await signInSupabaseAccount(user.email, body.password)
-      if (auth.user?.id !== user.auth_id) fail(401, 'Correo o contrasena incorrectos.')
+      authSession = await signInSupabaseAccount(user.email, body.password)
+      if (authSession.user?.id !== user.auth_id) fail(401, 'Correo o contrasena incorrectos.')
       db.prepare('UPDATE users SET auth_id=?,password=? WHERE id=?').run(user.auth_id, passwordHash(randomBytes(32).toString('hex')), user.id)
       user.password = passwordHash(body.password)
     }
     if (!user || !passwordMatches(body.password, user.password)) fail(401, 'Correo o contraseña incorrectos.')
-    newSession(res, user)
+    newSession(res, user, authSession)
     return send(res, 200, { user: publicUser(user) })
   }
-  const user = session(req)
+  if (path === '/api/logout' && req.method === 'POST') {
+    const token = sessionToken(req)
+    const stored = supabaseTokens(token)
+    res.setHeader('Set-Cookie', 'pausa_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0')
+    if (stored?.access_token) {
+      try {
+        await revokeSupabaseSession(stored.access_token)
+      } catch (error) {
+        if (error.status !== 401 || !stored.refresh_token) throw error
+        try {
+          const refreshed = await refreshSupabaseSession(stored.refresh_token)
+          await revokeSupabaseSession(refreshed.access_token)
+        } catch (refreshError) {
+          if (refreshError.status !== 401) throw refreshError
+        }
+      }
+    } else if (token) {
+      db.prepare('DELETE FROM sessions WHERE token=?').run(digest(token))
+    }
+    return send(res, 200, { ok: true })
+  }
+  const user = await session(req, res)
   if (!user) fail(401, 'Inicia sesión para continuar.')
   if (path === '/api/me' && req.method === 'GET') return send(res, 200, { user: publicUser(user) })
   if (path === '/api/routines' && req.method === 'GET') {
@@ -330,12 +387,6 @@ async function api(req, res, url) {
     if (!teacher) fail(401, 'La cuenta ya no está disponible.')
     db.prepare('INSERT INTO activity_records(id,teacher_id,teacher_name,teacher_ref,school,minutes,performed_on,video_id) VALUES(?,?,?,?,?,?,?,?)').run(id, teacher.id, teacher.name, teacher.id, teacher.school, body.minutes, date, body.video_id || null)
     return send(res, 201, { id })
-  }
-  if (path === '/api/logout' && req.method === 'POST') {
-    const token = req.headers.cookie?.split(';').map(c => c.trim()).find(c => c.startsWith('pausa_session='))?.slice(14)
-    if (token) db.prepare('DELETE FROM sessions WHERE token=?').run(digest(token))
-    res.setHeader('Set-Cookie', 'pausa_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0')
-    return send(res, 200, { ok: true })
   }
   if (path === '/api/schools' && req.method === 'GET') {
     if (!supabaseConfigured()) return send(res, 200, { schools: user.role === 'admin' ? db.prepare('SELECT * FROM schools ORDER BY name').all() : db.prepare('SELECT * FROM schools WHERE name=?').all(user.school) })

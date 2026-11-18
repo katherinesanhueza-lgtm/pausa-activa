@@ -127,6 +127,51 @@ export async function signInSupabaseAccount(email, password) {
   return data
 }
 
+async function supabaseUserRequest(resource, { accessToken, method = 'GET', body } = {}) {
+  if (!url || !publishableKey) {
+    throw Object.assign(new Error('Configura SUPABASE_PUBLISHABLE_KEY (o SUPABASE_ANON_KEY) en .env.'), { status: 503 })
+  }
+  const endpoint = new URL(`/auth/v1/${resource}`, url)
+  let response
+  try {
+    response = await fetch(endpoint, {
+      method,
+      headers: {
+        apikey: publishableKey,
+        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+        Accept: 'application/json',
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+      signal: AbortSignal.timeout(10000),
+    })
+  } catch (error) {
+    throw Object.assign(new Error(`No se pudo conectar con Supabase Auth: ${error.message}`), { status: 502 })
+  }
+  const text = await response.text()
+  let data
+  try { data = text ? JSON.parse(text) : null } catch { data = text }
+  if (!response.ok) {
+    const message = typeof data === 'object' && data ? data.msg || data.message || data.error_description || data.error : data
+    throw Object.assign(new Error(message || `Supabase Auth respondió HTTP ${response.status}.`), {
+      status: [400, 401].includes(response.status) ? 401 : response.status === 429 ? 429 : 502,
+    })
+  }
+  return data
+}
+
+export function getSupabaseAuthUser(accessToken) {
+  return supabaseUserRequest('user', { accessToken })
+}
+
+export function refreshSupabaseSession(refreshToken) {
+  return supabaseUserRequest('token?grant_type=refresh_token', { method: 'POST', body: { refresh_token: refreshToken } })
+}
+
+export function revokeSupabaseSession(accessToken) {
+  return supabaseUserRequest('logout?scope=local', { method: 'POST', accessToken })
+}
+
 export async function registerSupabaseAccount({ email, password, name, role, school }) {
   if (!supabaseAuthConfigured()) {
     throw Object.assign(new Error('Configura SUPABASE_PUBLISHABLE_KEY (o SUPABASE_ANON_KEY) en .env antes de gestionar cuentas.'), { status: 503 })
