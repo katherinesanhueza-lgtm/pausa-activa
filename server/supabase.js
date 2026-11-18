@@ -1,8 +1,13 @@
 const url = process.env.SUPABASE_URL
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY
 
 export function supabaseConfigured() {
   return Boolean(url && serviceKey)
+}
+
+export function supabaseAuthConfigured() {
+  return Boolean(url && publishableKey)
 }
 
 export async function supabaseRequest(resource, options = {}) {
@@ -23,7 +28,7 @@ export async function supabaseRequest(resource, options = {}) {
       ...options,
       headers: {
         apikey: serviceKey,
-        Authorization: `Bearer ${serviceKey}`,
+        ...(!serviceKey.startsWith('sb_secret_') ? { Authorization: `Bearer ${serviceKey}` } : {}),
         ...(options.body ? { 'Content-Type': 'application/json' } : {}),
         Accept: 'application/json',
         ...options.headers,
@@ -71,7 +76,7 @@ async function supabaseAuthRequest(resource, options = {}) {
       ...options,
       headers: {
         apikey: serviceKey,
-        Authorization: `Bearer ${serviceKey}`,
+        ...(!serviceKey.startsWith('sb_secret_') ? { Authorization: `Bearer ${serviceKey}` } : {}),
         ...(options.body ? { 'Content-Type': 'application/json' } : {}),
         Accept: 'application/json',
         ...options.headers,
@@ -94,7 +99,38 @@ async function supabaseAuthRequest(resource, options = {}) {
   return data
 }
 
+export async function signInSupabaseAccount(email, password) {
+  if (!url || !publishableKey) {
+    throw Object.assign(new Error('Configura SUPABASE_PUBLISHABLE_KEY (o SUPABASE_ANON_KEY) en .env.'), { status: 503 })
+  }
+  const endpoint = new URL('/auth/v1/token?grant_type=password', url)
+  let response
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { apikey: publishableKey, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ email, password }),
+      signal: AbortSignal.timeout(10000),
+    })
+  } catch (error) {
+    throw Object.assign(new Error(`No se pudo conectar con Supabase Auth: ${error.message}`), { status: 502 })
+  }
+  const text = await response.text()
+  let data
+  try { data = text ? JSON.parse(text) : null } catch { data = text }
+  if (!response.ok) {
+    const message = typeof data === 'object' && data ? data.msg || data.message || data.error_description || data.error : data
+    throw Object.assign(new Error(message || 'No se pudo validar la cuenta en Supabase Auth.'), {
+      status: [400, 401].includes(response.status) ? 401 : response.status === 429 ? 429 : 502,
+    })
+  }
+  return data
+}
+
 export async function registerSupabaseAccount({ email, password, name, role, school }) {
+  if (!supabaseAuthConfigured()) {
+    throw Object.assign(new Error('Configura SUPABASE_PUBLISHABLE_KEY (o SUPABASE_ANON_KEY) en .env antes de gestionar cuentas.'), { status: 503 })
+  }
   const existing = await supabaseAuthRequest('admin/users?page=1&per_page=1000')
   const match = existing?.users?.find(user => user.email?.toLowerCase() === email.toLowerCase())
   const authUser = match || await supabaseAuthRequest('admin/users', {

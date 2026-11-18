@@ -22,7 +22,7 @@ try {
   const response = await fetch(endpoint, {
     headers: {
       apikey: SUPABASE_SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      ...(!SUPABASE_SERVICE_ROLE_KEY.startsWith('sb_secret_') ? { Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}` } : {}),
       Accept: 'application/json',
     },
     signal: AbortSignal.timeout(10000),

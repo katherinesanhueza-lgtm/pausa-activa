@@ -7,7 +7,8 @@ import { resolve, join, extname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   createSupabaseSchool, deleteSupabaseAccount, listSupabaseSchools,
-  registerSupabaseAccount, supabaseConfigured, updateSupabaseProfile,
+  registerSupabaseAccount, signInSupabaseAccount, supabaseAuthConfigured,
+  supabaseConfigured, updateSupabaseProfile,
 } from './supabase.js'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
@@ -184,7 +185,7 @@ function account(body) {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) fail(400, 'Ingresa un correo válido.')
   if (typeof body.password !== 'string' || body.password.length < 8 || body.password.length > 128) fail(400, 'La contraseña debe tener entre 8 y 128 caracteres.')
   if (db.prepare('SELECT id FROM users WHERE email = ?').get(email)) fail(409, 'Ya existe una cuenta con ese correo.')
-  return { name, email, password: passwordHash(body.password) }
+  return { name, email, password: passwordHash(supabaseConfigured() ? randomBytes(32).toString('hex') : body.password) }
 }
 function session(req) {
   const token = req.headers.cookie?.split(';').map(c => c.trim()).find(c => c.startsWith('pausa_session='))?.slice(14)
@@ -254,6 +255,17 @@ async function api(req, res, url) {
     if (user && passwordMatches(body.password, user.password) && supabaseConfigured() && !user.auth_id) {
       user.auth_id = await registerSupabaseAccount({ email: user.email, password: body.password, name: user.name, role: user.role, school: user.school })
       db.prepare('UPDATE users SET auth_id=? WHERE id=?').run(user.auth_id, user.id)
+    }
+    if (user && supabaseConfigured()) {
+      if (!supabaseAuthConfigured()) fail(503, 'Falta SUPABASE_PUBLISHABLE_KEY en .env.')
+      if (!user.auth_id) {
+        if (!passwordMatches(body.password, user.password)) fail(401, 'Correo o contrasena incorrectos.')
+        user.auth_id = await registerSupabaseAccount({ email: user.email, password: body.password, name: user.name, role: user.role, school: user.school })
+      }
+      const auth = await signInSupabaseAccount(user.email, body.password)
+      if (auth.user?.id !== user.auth_id) fail(401, 'Correo o contrasena incorrectos.')
+      db.prepare('UPDATE users SET auth_id=?,password=? WHERE id=?').run(user.auth_id, passwordHash(randomBytes(32).toString('hex')), user.id)
+      user.password = passwordHash(body.password)
     }
     if (!user || !passwordMatches(body.password, user.password)) fail(401, 'Correo o contraseña incorrectos.')
     newSession(res, user)
