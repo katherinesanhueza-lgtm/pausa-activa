@@ -100,6 +100,21 @@ test('Escuela: cuentas, permisos, videos, persistencia y revocación de acceso',
   assert.equal((await request('/routines', { cookie: login.cookie })).data.routines[0].sections[0].name, 'Lunes')
   const routinePath = `/routines/${createdRoutine.data.id}`
   assert.equal((await request(routinePath, { method: 'PUT', cookie: login2.cookie, body: routine })).status, 403)
+  // Compartir con un profesor específico: la rutina sigue privada, pero el invitado la ve.
+  const colleagues = (await request('/colleagues', { cookie: login.cookie })).data.colleagues
+  assert.ok(colleagues.some(c => c.id === teacher2.data.teacher.id))
+  assert.ok(!colleagues.some(c => c.id === teacher.data.teacher.id))
+  assert.equal((await request(routinePath, { method: 'PUT', cookie: login.cookie, body: { ...routine, shared_with: [teacher.data.teacher.id] } })).status, 400)
+  assert.equal((await request(routinePath, { method: 'PUT', cookie: login.cookie, body: { ...routine, shared_with: ['no-existe'] } })).status, 400)
+  assert.equal((await request(routinePath, { method: 'PUT', cookie: login.cookie, body: { ...routine, shared_with: [teacher2.data.teacher.id] } })).status, 200)
+  const sharedView = (await request('/routines', { cookie: login2.cookie })).data.routines
+  assert.equal(sharedView.length, 1)
+  assert.equal(sharedView[0].shared, false)
+  assert.equal(sharedView[0].shared_with_me, true)
+  assert.deepEqual(sharedView[0].shared_with, [])
+  assert.equal((await request('/routines', { cookie: login.cookie })).data.routines[0].shared_with[0].teacher_id, teacher2.data.teacher.id)
+  assert.equal((await request(routinePath, { method: 'PUT', cookie: login.cookie, body: { ...routine, shared_with: [] } })).status, 200)
+  assert.equal((await request('/routines', { cookie: login2.cookie })).data.routines.length, 0)
   assert.equal((await request(routinePath, { method: 'PUT', cookie: login.cookie, body: { ...routine, shared: true } })).status, 200)
   assert.equal((await request('/routines', { cookie: login2.cookie })).data.routines.length, 1)
   assert.equal((await request('/routines', { method: 'POST', cookie: login.cookie, body: { ...routine, sections: [] } })).status, 400)

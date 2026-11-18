@@ -61,6 +61,13 @@ if (!db.prepare("SELECT sql FROM sqlite_master WHERE name='users'").get().sql.in
 }
 db.exec(`CREATE TABLE IF NOT EXISTS schools(id TEXT PRIMARY KEY,name TEXT UNIQUE COLLATE NOCASE NOT NULL);
  INSERT OR IGNORE INTO schools(id,name) SELECT lower(hex(randomblob(16))),school FROM users WHERE school!='';`)
+// Rutinas compartidas con docentes específicos (sin hacerlas públicas).
+// Si se borra la rutina o el docente, la fila se elimina sola (ON DELETE CASCADE).
+db.exec(`CREATE TABLE IF NOT EXISTS routine_shares (
+  routine_id TEXT NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
+  teacher_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  PRIMARY KEY (routine_id, teacher_id)
+)`)
 for (const [name, definition] of [['course', "TEXT NOT NULL DEFAULT ''"], ['intensity', "TEXT NOT NULL DEFAULT 'Media'"]]) {
  if (!db.prepare('PRAGMA table_info(routines)').all().some(c => c.name === name)) db.exec('ALTER TABLE routines ADD COLUMN ' + name + ' ' + definition)
 }
@@ -331,9 +338,24 @@ async function api(req, res, url) {
   const user = await session(req, res)
   if (!user) fail(401, 'Inicia sesión para continuar.')
   if (path === '/api/me' && req.method === 'GET') return send(res, 200, { user: publicUser(user) })
+  // Docentes con los que se puede compartir una rutina (todos menos uno mismo).
+  if (path === '/api/colleagues' && req.method === 'GET') {
+    if (!['teacher','admin'].includes(user.role)) fail(403, 'No puedes compartir rutinas.')
+    return send(res, 200, { colleagues: db.prepare("SELECT id,name,school FROM users WHERE role='teacher' AND id!=? ORDER BY school,name").all(user.id) })
+  }
   if (path === '/api/routines' && req.method === 'GET') {
-    const routines = db.prepare("SELECT r.*,u.name AS teacher_name,u.school FROM routines r JOIN users u ON u.id=r.teacher_id WHERE r.shared=1 OR r.teacher_id=? OR ?='admin' ORDER BY r.updated_at DESC,r.rowid DESC").all(user.id,user.role)
-    return send(res, 200, { routines: routines.map(r => ({ ...r, sections: JSON.parse(r.sections), shared: !!r.shared })) })
+    // Cada usuario ve: las públicas, las suyas, las que le compartieron y (si es admin) todas.
+    const routines = db.prepare(`SELECT r.*,u.name AS teacher_name,u.school,
+      EXISTS(SELECT 1 FROM routine_shares s WHERE s.routine_id=r.id AND s.teacher_id=?) AS shared_with_me
+      FROM routines r JOIN users u ON u.id=r.teacher_id
+      WHERE r.shared=1 OR r.teacher_id=? OR ?='admin' OR EXISTS(SELECT 1 FROM routine_shares s WHERE s.routine_id=r.id AND s.teacher_id=?)
+      ORDER BY r.updated_at DESC,r.rowid DESC`).all(user.id, user.id, user.role, user.id)
+    const sharesOf = db.prepare('SELECT s.teacher_id,u.name,u.school FROM routine_shares s JOIN users u ON u.id=s.teacher_id WHERE s.routine_id=? ORDER BY u.name')
+    return send(res, 200, { routines: routines.map(r => ({
+      ...r, sections: JSON.parse(r.sections), shared: !!r.shared, shared_with_me: !!r.shared_with_me,
+      // Solo el autor y el administrador ven la lista de docentes invitados.
+      shared_with: r.teacher_id === user.id || user.role === 'admin' ? sharesOf.all(r.id) : [],
+    })) })
   }
   const routineId = path.match(/^\/api\/routines\/([\w-]+)$/)?.[1]
   if (routineId && req.method === 'DELETE') {
@@ -346,12 +368,23 @@ async function api(req, res, url) {
   }
   if ((path === '/api/routines' && req.method === 'POST') || (routineId && req.method === 'PUT')) {
     if (!['teacher','admin'].includes(user.role)) fail(403, 'No puedes crear rutinas.')
+    let ownerId = user.id
     if (routineId) {
       const existing = db.prepare('SELECT * FROM routines WHERE id=?').get(routineId)
       if (!existing) fail(404, 'Rutina no encontrada.')
       if (existing.teacher_id !== user.id && user.role !== 'admin') fail(403, 'Solo puedes editar tus propias rutinas.')
+      ownerId = existing.teacher_id
     }
     const body = await json(req)
+    // shared_with: lista de ids de docentes invitados. Si no viene, se conserva la lista actual.
+    let sharedWith = null
+    if (body.shared_with !== undefined) {
+      if (!Array.isArray(body.shared_with) || body.shared_with.length > 50) fail(400, 'Puedes compartir con hasta 50 profesores.')
+      sharedWith = [...new Set(body.shared_with)]
+      for (const teacherId of sharedWith) {
+        if (typeof teacherId !== 'string' || teacherId === ownerId || !db.prepare("SELECT id FROM users WHERE id=? AND role='teacher'").get(teacherId)) fail(400, 'Uno de los profesores seleccionados no está disponible.')
+      }
+    }
     const course = text(body.course || '', 'Curso', 100, 0)
     const intensity = body.intensity || 'Media'
     if (!['Baja','Media','Alta'].includes(intensity)) fail(400, 'Intensidad no válida.')
@@ -373,6 +406,12 @@ async function api(req, res, url) {
     if (routineId) db.prepare('UPDATE routines SET title=?,description=?,organization=?,sections=?,shared=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(title, description, body.organization, JSON.stringify(sections), Number(body.shared), id)
     else db.prepare('INSERT INTO routines(id,teacher_id,title,description,organization,sections,shared) VALUES(?,?,?,?,?,?,?)').run(id, user.id, title, description, body.organization, JSON.stringify(sections), Number(body.shared))
     db.prepare('UPDATE routines SET course=?,intensity=? WHERE id=?').run(course,intensity,id)
+    if (sharedWith) {
+      // Se reemplaza la lista completa de invitados.
+      db.prepare('DELETE FROM routine_shares WHERE routine_id=?').run(id)
+      const insert = db.prepare('INSERT INTO routine_shares(routine_id,teacher_id) VALUES(?,?)')
+      for (const teacherId of sharedWith) insert.run(id, teacherId)
+    }
     return send(res, routineId ? 200 : 201, { id })
   }
   if (path === '/api/reports' && req.method === 'GET') return send(res, 200, report(user, url))

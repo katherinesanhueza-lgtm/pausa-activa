@@ -41,3 +41,9 @@ input:not([type=checkbox]),select,textarea{background:#fbfdff;border-color:#c8dc
 .sidebar .nav-label{color:#b2d1de}.sidebar .nav-item{color:#d1e7ef}.sidebar .nav-item:hover{background:#24596d;color:#fff}.sidebar .nav-item.active{background:#91e8df;color:#103f50;box-shadow:none}.sidebar .nav-count{background:#2c6275;color:#e3fbff}.sidebar .nav-item.active .nav-count{background:#c5f7f1;color:#124b59}
 .sidebar .sidebar-note{background:#204e61;border-color:#3b6879;color:#fff0bd}.sidebar .sidebar-note p{color:#d1e3eb}.sidebar .sidebar-note>span{color:#ffd45b}
 .sidebar .sidebar-account{border-color:#356477}.sidebar .sidebar-account strong{color:#f0fbff}.sidebar .sidebar-account>div>span{color:#bedbe6}.sidebar .avatar{background:#2a6575;color:#c5fff4}.sidebar .icon-button{color:#c4e1ec}.sidebar .icon-button:hover{background:#2a6074;color:#fff}
+
+/* Compartir rutinas con profesores específicos */
+.share-picker{border:1px solid #cee2e9;border-radius:10px;padding:12px 14px;margin:14px 0}
+.share-picker legend{font-size:12px;font-weight:600;color:#244d62;padding:0 6px}
+.share-list{display:grid;gap:8px;max-height:180px;overflow:auto;margin-top:8px}
+.share-list .checkbox-label{white-space:normal}
