@@ -36,6 +36,8 @@ Para volver a procesarlo, `scripts/cartoonize-video.py` recibe el archivo origin
 
 Los datos se conservan entre reinicios en `data/school.sqlite` y los archivos en `data/uploads/`. Haz respaldo de toda la carpeta `data/` con el servidor detenido. No la publiques ni la subas al repositorio. Las contraseñas se guardan mediante scrypt y las sesiones usan cookies HttpOnly con expiración. Los permisos se verifican en la API.
 
+La migración a Supabase se está haciendo por partes. El catálogo de colegios se lee y escribe en `public.schools`; el servidor sincroniza allí los nombres que encuentre en SQLite. Al iniciar sesión y al crear cuentas, el servidor también crea o actualiza el usuario de Supabase Auth y su fila en `public.profiles`. La validación de inicio de sesión y las sesiones todavía usan SQLite; videos, rutinas y pausas también permanecen allí. Para el backend define `SUPABASE_URL` y `SUPABASE_SERVICE_ROLE_KEY` en `.env`; la clave secreta no debe usarse en Vue ni subirse al repositorio.
+
 Esta instalación permite administrar **varios colegios desde un administrador central**. Cada docente tiene un colegio asignado por el administrador. La biblioteca se comparte entre los usuarios de esta instalación; el perfil Colegio tiene acceso de consulta limitado a su institución. No incluye recuperación de contraseña por correo ni envío automático de invitaciones: el administrador entrega las credenciales al docente.
 
 ## Minutos, sesiones y reportes
@@ -69,6 +71,8 @@ Las pruebas de integración usan un directorio temporal y verifican configuraci�
 ## Estructura
 
 - `server/index.js`: API, autenticación, SQLite, archivos y servidor de producción.
+- `server/supabase.js`: consultas del backend a Supabase durante la migración.
+- `supabase/schema.sql`: esquema inicial de tablas para Supabase.
 - `server/index.test.js`: pruebas de integración.
 - `scripts/dev.mjs`: inicio conjunto de Vite y API.
 - `src/views/AuthView.vue`: configuración inicial e inicio de sesión.
