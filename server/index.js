@@ -336,6 +336,14 @@ async function api(req, res, url) {
     return send(res, 200, { routines: routines.map(r => ({ ...r, sections: JSON.parse(r.sections), shared: !!r.shared })) })
   }
   const routineId = path.match(/^\/api\/routines\/([\w-]+)$/)?.[1]
+  if (routineId && req.method === 'DELETE') {
+    const existing = db.prepare('SELECT teacher_id FROM routines WHERE id=?').get(routineId)
+    if (!existing) fail(404, 'Rutina no encontrada.')
+    // Solo el autor o el administrador pueden eliminar una rutina.
+    if (existing.teacher_id !== user.id && user.role !== 'admin') fail(403, 'Solo puedes eliminar tus propias rutinas.')
+    db.prepare('DELETE FROM routines WHERE id=?').run(routineId)
+    return send(res, 200, { ok: true })
+  }
   if ((path === '/api/routines' && req.method === 'POST') || (routineId && req.method === 'PUT')) {
     if (!['teacher','admin'].includes(user.role)) fail(403, 'No puedes crear rutinas.')
     if (routineId) {
@@ -525,7 +533,8 @@ async function api(req, res, url) {
   if (videoId && req.method === 'DELETE') {
     const video = db.prepare('SELECT * FROM videos WHERE id=?').get(videoId)
     if (!video) fail(404, 'Video no encontrado.')
-    if (user.role !== 'teacher' || video.teacher_id !== user.id) fail(403, 'Solo puedes eliminar tus propios videos.')
+    // El autor elimina sus videos; el administrador puede retirar cualquiera (moderación).
+    if (user.role !== 'admin' && (user.role !== 'teacher' || video.teacher_id !== user.id)) fail(403, 'Solo puedes eliminar tus propios videos.')
     db.prepare('DELETE FROM videos WHERE id=?').run(videoId)
     removeFile(video.filename)
     return send(res, 200, { ok: true })

@@ -4,7 +4,7 @@ import { api } from '../services/api'
 import AppDialog from './ui/AppDialog.vue'
 const props = defineProps({ user: Object, videos: Array, mine: Boolean })
 const routines = ref([]), search = ref(''), error = ref(''), busy = ref(false), loading = ref(true)
-const draft = ref(null), viewing = ref(null), playing = ref(null), notice = ref('')
+const draft = ref(null), viewing = ref(null), playing = ref(null), notice = ref(''), removing = ref(null)
 const schoolFilter=ref(''), courseFilter=ref(''), intensityFilter=ref('')
 const schools=computed(() => [...new Set(routines.value.map(r=>r.school))])
 const courses=computed(() => [...new Set(routines.value.map(r=>r.course).filter(Boolean))])
@@ -32,6 +32,14 @@ async function save() {
     draft.value = null; await load()
   } catch (e) { error.value = e.message } finally { busy.value = false }
 }
+// Elimina una rutina propia; el administrador puede eliminar cualquiera.
+async function remove() {
+  busy.value = true; error.value = ''
+  try {
+    await api(`/routines/${removing.value.id}`, { method: 'DELETE' })
+    notice.value = 'Rutina eliminada.'; removing.value = null; await load()
+  } catch (e) { error.value = e.message } finally { busy.value = false }
+}
 onMounted(load)
 </script>
 <template>
@@ -48,7 +56,7 @@ onMounted(load)
         <div class="post-author"><span class="avatar">{{ r.teacher_name.slice(0, 2).toUpperCase() }}</span><div><strong>{{ r.teacher_name }}</strong><p class="muted small">{{ r.school }} · {{ r.shared ? 'Pública · Comunidad' : 'Privada' }}</p></div><span class="category-tag">{{ r.organization }}</span></div>
         <h3><button class="title-button" @click="viewing = r">{{ r.title }}</button></h3><p class="routine-description">{{ r.description || 'Una pausa para reconectar y movernos juntos.' }}</p>
         <div class="routine-summary"><span>{{ r.course || 'Todos los cursos' }}</span><span>Intensidad {{ r.intensity.toLowerCase() }}</span><span>{{ r.sections.length }} {{ r.organization.toLowerCase() }}</span><span>{{ count(r) }} ejercicios</span><span>{{ total(r) }} min</span></div>
-        <div class="post-actions"><button class="button secondary" @click="viewing = r">Ver rutina</button><button v-if="(r.teacher_id === user.id || user.role === 'admin')" class="text-button" @click="edit(r)">Editar rutina</button><button v-else-if="['teacher','admin'].includes(user.role)" class="text-button" @click="copy(r)">Guardar una copia</button></div>
+        <div class="post-actions"><button class="button secondary" @click="viewing = r">Ver rutina</button><button v-if="(r.teacher_id === user.id || user.role === 'admin')" class="text-button" @click="edit(r)">Editar rutina</button><button v-if="(r.teacher_id === user.id || user.role === 'admin')" class="text-button danger" @click="removing = r; error = ''">Eliminar</button><button v-else-if="['teacher','admin'].includes(user.role)" class="text-button" @click="copy(r)">Guardar una copia</button></div>
       </article>
       <div v-if="!filtered.length && !error" class="empty panel"><h3>{{ search ? 'Sin resultados' : mine ? 'Dale forma a tu primera rutina' : 'La comunidad empieza contigo' }}</h3><p>{{ search ? 'Prueba con otro nombre o profesor.' : 'Crea una rutina con ejercicios de la biblioteca y compártela con tus colegas.' }}</p></div>
     </div>
@@ -73,6 +81,12 @@ onMounted(load)
         <p v-if="error" class="alert error" role="alert">{{ error }}</p>
         <div class="modal-actions"><button type="button" class="button secondary" :disabled="busy" @click="draft = null; error = ''">Cancelar</button><button class="button primary" :disabled="busy || !videos.length">{{ busy ? 'Guardando…' : draft.shared ? 'Guardar y compartir' : 'Guardar rutina' }}</button></div>
       </form>
+    </AppDialog>
+    <AppDialog v-if="removing" title="Eliminar rutina" :busy="busy" @close="removing = null; error = ''">
+      <p>¿Quieres eliminar <strong>{{ removing.title }}</strong>? Esta acción no se puede deshacer.</p>
+      <p v-if="removing.teacher_id !== user.id" class="alert">Estás eliminando una rutina de {{ removing.teacher_name }} como administrador.</p>
+      <p v-if="error" class="alert error" role="alert">{{ error }}</p>
+      <div class="modal-actions"><button class="button secondary" :disabled="busy" @click="removing = null; error = ''">Cancelar</button><button class="button destructive" :disabled="busy" @click="remove">{{ busy ? 'Eliminando…' : 'Eliminar rutina' }}</button></div>
     </AppDialog>
     <AppDialog v-if="viewing" :title="viewing.title" wide @close="viewing = null; playing = null">
       <p class="muted">Por {{ viewing.teacher_name }} · {{ total(viewing) }} minutos</p><p class="routine-description">{{ viewing.description }}</p>

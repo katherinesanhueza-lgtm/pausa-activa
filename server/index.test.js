@@ -85,7 +85,15 @@ test('Escuela: cuentas, permisos, videos, persistencia y revocación de acceso',
   const added = await request('/videos', { method: 'POST', cookie: login.cookie, body: video })
   assert.equal(added.status, 201)
   const routine = { title: 'Semana activa', description: 'Movimiento para el aula', organization: 'Días', shared: false, sections: [{ name: 'Lunes', exercises: [{ video_id: added.data.id, minutes: 3 }] }] }
-  assert.equal((await request('/routines', { method: 'POST', cookie: admin.cookie, body: routine })).status, 403)
+  // El administrador tiene acceso total: puede crear rutinas y moderar contenido ajeno.
+  const adminRoutine = await request('/routines', { method: 'POST', cookie: admin.cookie, body: routine })
+  assert.equal(adminRoutine.status, 201)
+  assert.equal((await request(`/routines/${adminRoutine.data.id}`, { method: 'DELETE', cookie: login.cookie })).status, 403)
+  assert.equal((await request(`/routines/${adminRoutine.data.id}`, { method: 'DELETE', cookie: admin.cookie })).status, 200)
+  assert.equal((await request(`/routines/${adminRoutine.data.id}`, { method: 'DELETE', cookie: admin.cookie })).status, 404)
+  const foreignVideo = await request('/videos', { method: 'POST', cookie: login2.cookie, body: video })
+  assert.equal((await request(`/videos/${foreignVideo.data.id}`, { method: 'DELETE', cookie: login.cookie })).status, 403)
+  assert.equal((await request(`/videos/${foreignVideo.data.id}`, { method: 'DELETE', cookie: admin.cookie })).status, 200)
   const createdRoutine = await request('/routines', { method: 'POST', cookie: login.cookie, body: routine })
   assert.equal(createdRoutine.status, 201)
   assert.equal((await request('/routines', { cookie: login2.cookie })).data.routines.length, 0)
