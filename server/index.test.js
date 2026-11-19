@@ -7,10 +7,12 @@ import { join } from 'node:path'
 import { once } from 'node:events'
 import { randomUUID } from 'node:crypto'
 
+// Prueba integral: usa un servidor real y una base temporal para comprobar los flujos de la API.
 test('Escuela: cuentas, permisos, videos, persistencia y revocación de acceso', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'pausa-test-'))
   let processHandle
   let base
+  // Arranca el servidor en un puerto libre y espera a que anuncie su dirección.
   async function start() {
     processHandle = spawn(process.execPath, ['server/index.js'], { env: { ...process.env, DATA_DIR: directory, PORT: '0' }, stdio: ['ignore', 'pipe', 'pipe'] })
     base = await new Promise((resolve, reject) => {
@@ -26,8 +28,10 @@ test('Escuela: cuentas, permisos, videos, persistencia y revocación de acceso',
     })
   }
   async function stop() { if (processHandle && processHandle.exitCode === null) { const closed = once(processHandle, 'exit'); processHandle.kill(); await closed } }
+  // Cierra el servidor y elimina únicamente la carpeta temporal creada para esta prueba.
   t.after(async () => { await stop(); rmSync(directory, { recursive: true, force: true }) })
   await start()
+  // Simula un cliente: envía JSON o datos binarios y conserva la cookie devuelta.
   async function request(path, { method = 'GET', body, cookie, headers = {}, raw = false } = {}) {
     const response = await fetch(base + '/api' + path, { method, headers: { ...(cookie ? { Cookie: cookie } : {}), ...(body && !raw ? { 'Content-Type': 'application/json' } : {}), ...headers }, body: body ? raw ? body : JSON.stringify(body) : undefined })
     const data = await response.json().catch(() => ({}))
@@ -78,14 +82,16 @@ test('Escuela: cuentas, permisos, videos, persistencia y revocación de acceso',
   assert.equal((await request('/teachers', { cookie: login.cookie })).status, 403)
   assert.equal((await request('/teachers', { method: 'POST', cookie: login.cookie, body: {} })).status, 403)
   assert.equal((await request(`/teachers/${teacher2.data.teacher.id}`, { method: 'DELETE', cookie: login.cookie })).status, 403)
+  // Comprueba permisos de publicación y validación de enlaces y categorías de videos.
   const video = { title: 'Pausa en el aula', description: 'Una prueba', category: 'Movimiento', url: 'https://youtu.be/dQw4w9WgXcQ' }
   assert.equal((await request('/videos', { method: 'POST', cookie: admin.cookie, body: video })).status, 403)
   assert.equal((await request('/videos', { method: 'POST', cookie: login.cookie, body: { ...video, url: 'javascript:alert(1)' } })).status, 400)
   assert.equal((await request('/videos', { method: 'POST', cookie: login.cookie, body: { ...video, category: 'No existe' } })).status, 400)
   const added = await request('/videos', { method: 'POST', cookie: login.cookie, body: video })
   assert.equal(added.status, 201)
+  // Administradores y docentes pueden crear rutinas; las privadas solo son visibles según los permisos.
   const routine = { title: 'Semana activa', description: 'Movimiento para el aula', organization: 'Días', shared: false, sections: [{ name: 'Lunes', exercises: [{ video_id: added.data.id, minutes: 3 }] }] }
-  assert.equal((await request('/routines', { method: 'POST', cookie: admin.cookie, body: routine })).status, 403)
+  assert.equal((await request('/routines', { method: 'POST', cookie: admin.cookie, body: routine })).status, 201)
   const createdRoutine = await request('/routines', { method: 'POST', cookie: login.cookie, body: routine })
   assert.equal(createdRoutine.status, 201)
   assert.equal((await request('/routines', { cookie: login2.cookie })).data.routines.length, 0)

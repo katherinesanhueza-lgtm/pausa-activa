@@ -1,15 +1,19 @@
+// Integración ejecutada solo en el servidor: las claves privadas se leen del entorno.
 const url = process.env.SUPABASE_URL
 const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
 const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY || process.env.SUPABASE_ANON_KEY
 
+// Comprueba si el backend tiene la URL y la clave de servicio necesarias para acceder a datos remotos.
 export function supabaseConfigured() {
   return Boolean(url && serviceKey)
 }
 
+// Comprueba si está disponible la clave pública necesaria para autenticar usuarios.
 export function supabaseAuthConfigured() {
   return Boolean(url && publishableKey)
 }
 
+// Realiza solicitudes a la API REST con la clave de servicio, tiempo límite y errores normalizados.
 export async function supabaseRequest(resource, options = {}) {
   if (!supabaseConfigured()) {
     throw Object.assign(new Error('Configura SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY en .env.'), { status: 503 })
@@ -52,10 +56,12 @@ export async function supabaseRequest(resource, options = {}) {
   return data
 }
 
+// Consulta el catálogo de colegios ordenado por nombre.
 export async function listSupabaseSchools() {
   return await supabaseRequest('schools?select=id,name&order=name.asc') || []
 }
 
+// Inserta un colegio y solicita que la API devuelva el registro creado.
 export async function createSupabaseSchool(name) {
   const result = await supabaseRequest('schools?select=id,name', {
     method: 'POST',
@@ -65,6 +71,7 @@ export async function createSupabaseSchool(name) {
   return result?.[0]
 }
 
+// Realiza operaciones administrativas de autenticación usando la clave privada del servidor.
 async function supabaseAuthRequest(resource, options = {}) {
   if (!supabaseConfigured()) {
     throw Object.assign(new Error('Configura SUPABASE_URL y SUPABASE_SERVICE_ROLE_KEY en .env.'), { status: 503 })
@@ -99,6 +106,7 @@ async function supabaseAuthRequest(resource, options = {}) {
   return data
 }
 
+// Intercambia correo y contraseña por una sesión mediante la clave pública.
 export async function signInSupabaseAccount(email, password) {
   if (!url || !publishableKey) {
     throw Object.assign(new Error('Configura SUPABASE_PUBLISHABLE_KEY (o SUPABASE_ANON_KEY) en .env.'), { status: 503 })
@@ -127,6 +135,7 @@ export async function signInSupabaseAccount(email, password) {
   return data
 }
 
+// Ejecuta operaciones de sesión de usuario y traduce los errores de autenticación a estados HTTP.
 async function supabaseUserRequest(resource, { accessToken, method = 'GET', body } = {}) {
   if (!url || !publishableKey) {
     throw Object.assign(new Error('Configura SUPABASE_PUBLISHABLE_KEY (o SUPABASE_ANON_KEY) en .env.'), { status: 503 })
@@ -160,18 +169,22 @@ async function supabaseUserRequest(resource, { accessToken, method = 'GET', body
   return data
 }
 
+// Obtiene la identidad asociada a un token de acceso vigente.
 export function getSupabaseAuthUser(accessToken) {
   return supabaseUserRequest('user', { accessToken })
 }
 
+// Solicita nuevos tokens usando el token de renovación.
 export function refreshSupabaseSession(refreshToken) {
   return supabaseUserRequest('token?grant_type=refresh_token', { method: 'POST', body: { refresh_token: refreshToken } })
 }
 
+// Revoca la sesión remota actual con alcance local.
 export function revokeSupabaseSession(accessToken) {
   return supabaseUserRequest('logout?scope=local', { method: 'POST', accessToken })
 }
 
+// Reutiliza o crea la cuenta remota y guarda su perfil asociado al colegio correspondiente.
 export async function registerSupabaseAccount({ email, password, name, role, school }) {
   if (!supabaseAuthConfigured()) {
     throw Object.assign(new Error('Configura SUPABASE_PUBLISHABLE_KEY (o SUPABASE_ANON_KEY) en .env antes de gestionar cuentas.'), { status: 503 })
@@ -199,13 +212,14 @@ export async function registerSupabaseAccount({ email, password, name, role, sch
     })
   } catch (error) {
     if (!match) {
-      try { await supabaseAuthRequest(`admin/users/${authUser.id}`, { method: 'DELETE' }) } catch { /* Preserve the original profile error. */ }
+      try { await supabaseAuthRequest(`admin/users/${authUser.id}`, { method: 'DELETE' }) } catch { /* Conserva el error original del perfil si también falla la limpieza. */ }
     }
     throw error
   }
   return authUser.id
 }
 
+// Actualiza nombre, rol y colegio del perfil remoto.
 export async function updateSupabaseProfile(id, { name, role, school }) {
   const schoolMatch = school
     ? (await listSupabaseSchools()).find(item => item.name.toLocaleLowerCase('es') === school.toLocaleLowerCase('es'))
@@ -217,6 +231,7 @@ export async function updateSupabaseProfile(id, { name, role, school }) {
   })
 }
 
+// Elimina la cuenta de autenticación remota mediante la API administrativa.
 export async function deleteSupabaseAccount(id) {
   await supabaseAuthRequest(`admin/users/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }

@@ -1,3 +1,4 @@
+// Backend HTTP: autenticación, permisos, datos escolares y archivos de video.
 import { createServer } from 'node:http'
 import { DatabaseSync } from 'node:sqlite'
 import { randomBytes, randomUUID, scryptSync, timingSafeEqual, createHash } from 'node:crypto'
@@ -12,11 +13,13 @@ import {
   supabaseConfigured, updateSupabaseProfile,
 } from './supabase.js'
 
+// Resuelve las carpetas del proyecto y prepara el almacenamiento persistente de datos y videos.
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const directory = resolve(process.env.DATA_DIR || join(root, 'data'))
 const uploads = join(directory, 'uploads')
 mkdirSync(uploads, { recursive: true })
 const db = new DatabaseSync(join(directory, 'school.sqlite'))
+// Activa las relaciones y crea las tablas e índices si se ejecuta por primera vez.
 db.exec(`
   PRAGMA foreign_keys = ON;
   PRAGMA journal_mode = WAL;
@@ -52,6 +55,7 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 `)
+// Migra la restricción de roles de bases antiguas conservando los identificadores y sus relaciones.
 // Upgrade the role constraint without changing user IDs or foreign references.
 if (!db.prepare("SELECT sql FROM sqlite_master WHERE name='users'").get().sql.includes("'school'")) {
  db.exec(`PRAGMA foreign_keys=OFF; BEGIN;
@@ -59,6 +63,7 @@ if (!db.prepare("SELECT sql FROM sqlite_master WHERE name='users'").get().sql.in
  INSERT INTO users_new SELECT * FROM users; DROP TABLE users;
  ALTER TABLE users_new RENAME TO users; COMMIT; PRAGMA foreign_keys=ON;`)
 }
+// Completa el catálogo de colegios y agrega campos de rutinas sin borrar datos existentes.
 db.exec(`CREATE TABLE IF NOT EXISTS schools(id TEXT PRIMARY KEY,name TEXT UNIQUE COLLATE NOCASE NOT NULL);
  INSERT OR IGNORE INTO schools(id,name) SELECT lower(hex(randomblob(16))),school FROM users WHERE school!='';`)
 for (const [name, definition] of [['course', "TEXT NOT NULL DEFAULT ''"], ['intensity', "TEXT NOT NULL DEFAULT 'Media'"]]) {
@@ -73,11 +78,14 @@ if (!db.prepare('PRAGMA table_info(users)').all().some(column => column.name ===
   db.exec('ALTER TABLE users ADD COLUMN auth_id TEXT')
 }
 
+// Usa el calendario de Santiago para validar fechas y generar reportes.
 const today = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Santiago', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+// Valida fechas reales con formato YYYY-MM-DD antes de usarlas en consultas.
 function dateValue(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString().slice(0, 10) !== value) fail(400, 'Ingresa una fecha válida.')
   return value
 }
+// Normaliza el nombre del colegio y reutiliza o crea su registro local o en Supabase.
 async function schoolName(value) {
   const name = text(value, 'Colegio', 150).replace(/\s+/g, ' ')
   const canonical = db.prepare('SELECT name FROM schools WHERE name=? COLLATE NOCASE').get(name)?.name || name
@@ -99,6 +107,7 @@ async function schoolName(value) {
     throw error
   }
 }
+// Sincroniza con Supabase los nombres de colegios presentes en la base local.
 async function syncStoredSchools() {
   if (!supabaseConfigured()) return
   const names = new Set([
@@ -107,6 +116,7 @@ async function syncStoredSchools() {
   ])
   for (const name of names) await schoolName(name)
 }
+// Selecciona registros según el rol y agrega minutos y sesiones por colegio, docente y día.
 function report(user, url) {
   const from = url.searchParams.get('from') ? dateValue(url.searchParams.get('from')) : '2000-01-01'
   const to = url.searchParams.get('to') ? dateValue(url.searchParams.get('to')) : today()
@@ -116,6 +126,7 @@ function report(user, url) {
     ? db.prepare('SELECT * FROM activity_records WHERE performed_on BETWEEN ? AND ? ORDER BY performed_on DESC, created_at DESC, rowid DESC').all(from, to)
     : db.prepare('SELECT * FROM activity_records WHERE teacher_id=? AND performed_on BETWEEN ? AND ? ORDER BY performed_on DESC, created_at DESC, rowid DESC').all(user.id, from, to)
   const currentTeachers = user.role === 'school' ? db.prepare("SELECT id,name,school FROM users WHERE role='teacher' AND school=?").all(user.school) : user.role === 'admin' ? db.prepare("SELECT id,name,school FROM users WHERE role='teacher' ORDER BY school,name").all() : [user]
+  // Agrupa resultados; teacher_ref conserva la identidad histórica aunque se elimine una cuenta.
   const institutions = new Map()
   const teachers = new Map()
   const daily = new Map()
@@ -152,21 +163,27 @@ function report(user, url) {
 
 const categories = ['Movimiento', 'Baile', 'Respiración', 'Estiramientos']
 const uploadLimit = 100 * 1024 * 1024
+// Excluye el hash de contraseña y el identificador de autenticación de las respuestas públicas.
 const publicUser = ({ password, auth_id, ...user }) => user
 const digest = value => createHash('sha256').update(value).digest('hex')
+// Genera una sal aleatoria y deriva un hash scrypt para no guardar la contraseña original.
 function passwordHash(password) {
   const salt = randomBytes(16).toString('hex')
   return `${salt}:${scryptSync(password, salt, 64).toString('hex')}`
 }
+// Deriva el hash con la sal guardada y compara ambos valores en tiempo constante.
 function passwordMatches(password, stored) {
   const [salt, hash] = stored.split(':')
   return timingSafeEqual(scryptSync(password, salt, 64), Buffer.from(hash, 'hex'))
 }
+// Lanza un error con estado HTTP que el manejador principal convierte en respuesta JSON.
 function fail(status, message) { throw Object.assign(new Error(message), { status }) }
+// Responde en JSON y desactiva la caché para los datos de la API.
 function send(res, status, value) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
   res.end(JSON.stringify(value))
 }
+// Lee el cuerpo con un límite de 16 KB y rechaza contenido que no sea JSON válido.
 async function json(req) {
   const buffers = []; let size = 0
   for await (const chunk of req) {
@@ -176,10 +193,12 @@ async function json(req) {
   }
   try { return JSON.parse(Buffer.concat(buffers).toString()) } catch { fail(400, 'Datos no válidos.') }
 }
+// Valida el tipo y la longitud de un texto y elimina espacios de los extremos.
 function text(value, label, max = 120, min = 1) {
   if (typeof value !== 'string' || value.trim().length < min || value.trim().length > max) fail(400, `${label}: ingresa entre ${min} y ${max} caracteres.`)
   return value.trim()
 }
+// Valida los datos de una cuenta, comprueba correo duplicado y prepara el hash local.
 function account(body) {
   const name = text(body.name, 'Nombre', 100)
   const email = text(body.email, 'Correo', 200).toLowerCase()
@@ -188,17 +207,21 @@ function account(body) {
   if (db.prepare('SELECT id FROM users WHERE email = ?').get(email)) fail(409, 'Ya existe una cuenta con ese correo.')
   return { name, email, password: passwordHash(supabaseConfigured() ? randomBytes(32).toString('hex') : body.password) }
 }
+// Extrae la cookie pausa_session de las cabeceras de la petición.
 function sessionToken(req) {
   return req.headers.cookie?.split(';').map(c => c.trim()).find(c => c.startsWith('pausa_session='))?.slice(14) || null
 }
+// Decodifica los tokens de una cookie Supabase; devuelve null si no tiene ese formato.
 function supabaseTokens(token) {
   if (!token?.startsWith('supa.')) return null
   try { return JSON.parse(Buffer.from(token.slice(5), 'base64url').toString()) } catch { return null }
 }
+// Guarda los tokens de Supabase en una cookie HttpOnly con duración de treinta días.
 function setAuthCookie(res, session) {
   const value = `supa.${Buffer.from(JSON.stringify({ access_token: session.access_token, refresh_token: session.refresh_token }), 'utf8').toString('base64url')}`
   res.setHeader('Set-Cookie', `pausa_session=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000${process.env.COOKIE_SECURE === 'true' ? '; Secure' : ''}`)
 }
+// Resuelve el usuario autenticado desde Supabase o SQLite e intenta renovar el acceso remoto vencido.
 async function session(req, res) {
   const token = sessionToken(req)
   if (!token) return null
@@ -222,6 +245,7 @@ async function session(req, res) {
   }
   return db.prepare('SELECT u.* FROM sessions s JOIN users u ON s.user_id=u.id WHERE s.token=? AND s.expires>?').get(digest(token), Date.now()) || null
 }
+// Emite la cookie remota o crea una sesión local de siete días guardando solo el hash del token.
 function newSession(res, user, authSession = null) {
   if (authSession?.access_token && authSession?.refresh_token) {
     setAuthCookie(res, authSession)
@@ -232,12 +256,14 @@ function newSession(res, user, authSession = null) {
   db.prepare('INSERT INTO sessions(token,user_id,expires) VALUES(?,?,?)').run(digest(token), user.id, Date.now() + 7 * 86400000)
   res.setHeader('Set-Cookie', `pausa_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800${process.env.COOKIE_SECURE === 'true' ? '; Secure' : ''}`)
 }
+// Valida los metadatos comunes tanto a los enlaces como a los videos subidos.
 function videoDetails(body) {
   const title = text(body.title, 'Título')
   const description = text(body.description || '', 'Descripción', 1000, 0)
   if (!categories.includes(body.category)) fail(400, 'Selecciona una categoría válida.')
   return { title, description, category: body.category }
 }
+// Acepta enlaces HTTPS compatibles y transforma YouTube y Vimeo en URLs de reproducción.
 function validVideoUrl(raw) {
   let url
   try { url = new URL(raw) } catch { fail(400, 'Ingresa un enlace de video válido.') }
@@ -252,8 +278,10 @@ function validVideoUrl(raw) {
   if (/\.(mp4|webm)$/i.test(url.pathname)) return url.href
   fail(400, 'Usa un enlace de YouTube, Vimeo o un archivo directo MP4/WebM.')
 }
+// Elimina del almacenamiento el archivo de un video si todavía existe.
 function removeFile(filename) { if (filename && existsSync(join(uploads, filename))) unlinkSync(join(uploads, filename)) }
 const attempts = new Map()
+// Limita los intentos por dirección remota para frenar solicitudes repetidas de acceso.
 function rateLimit(req) {
   const key = req.socket.remoteAddress
   const now = Date.now()
@@ -263,9 +291,11 @@ function rateLimit(req) {
   if (record.count > 30) fail(429, 'Demasiados intentos. Intenta nuevamente en 15 minutos.')
 }
 
+// Enruta las solicitudes por URL y método; valida la sesión y los permisos antes de operar.
 async function api(req, res, url) {
   const path = url.pathname
   if (!['GET', 'HEAD'].includes(req.method) && req.headers.origin && req.headers.origin !== `http://${req.headers.host}` && req.headers.origin !== `https://${req.headers.host}`) fail(403, 'Origen de solicitud no permitido.')
+  // Configuración inicial: solo permite crear el primer administrador mientras no existan cuentas.
   if (path === '/api/setup' && req.method === 'GET') return send(res, 200, { required: !db.prepare("SELECT id FROM users WHERE role='admin'").get() })
   if (path === '/api/setup' && req.method === 'POST') {
     if (db.prepare("SELECT id FROM users WHERE role='admin'").get()) fail(403, 'La escuela ya está configurada.')
@@ -281,6 +311,7 @@ async function api(req, res, url) {
     newSession(res, user, authSession)
     return send(res, 201, { user: publicUser(user) })
   }
+  // Valida credenciales y, si corresponde, migra la cuenta local al servicio de autenticación.
   if (path === '/api/login' && req.method === 'POST') {
     rateLimit(req)
     const body = await json(req)
@@ -307,6 +338,7 @@ async function api(req, res, url) {
     newSession(res, user, authSession)
     return send(res, 200, { user: publicUser(user) })
   }
+  // Invalida la cookie y revoca la sesión en el sistema que la emitió.
   if (path === '/api/logout' && req.method === 'POST') {
     const token = sessionToken(req)
     const stored = supabaseTokens(token)
@@ -328,13 +360,16 @@ async function api(req, res, url) {
     }
     return send(res, 200, { ok: true })
   }
+  // Todas las rutas siguientes exigen un usuario con sesión vigente.
   const user = await session(req, res)
   if (!user) fail(401, 'Inicia sesión para continuar.')
   if (path === '/api/me' && req.method === 'GET') return send(res, 200, { user: publicUser(user) })
+  // Devuelve rutinas propias, compartidas o accesibles al administrador.
   if (path === '/api/routines' && req.method === 'GET') {
     const routines = db.prepare("SELECT r.*,u.name AS teacher_name,u.school FROM routines r JOIN users u ON u.id=r.teacher_id WHERE r.shared=1 OR r.teacher_id=? OR ?='admin' ORDER BY r.updated_at DESC,r.rowid DESC").all(user.id,user.role)
     return send(res, 200, { routines: routines.map(r => ({ ...r, sections: JSON.parse(r.sections), shared: !!r.shared })) })
   }
+  // Crear o editar rutinas requiere validar autoría, secciones, videos y duraciones.
   const routineId = path.match(/^\/api\/routines\/([\w-]+)$/)?.[1]
   if ((path === '/api/routines' && req.method === 'POST') || (routineId && req.method === 'PUT')) {
     if (!['teacher','admin'].includes(user.role)) fail(403, 'No puedes crear rutinas.')
@@ -368,6 +403,7 @@ async function api(req, res, url) {
     return send(res, routineId ? 200 : 201, { id })
   }
   if (path === '/api/reports' && req.method === 'GET') return send(res, 200, report(user, url))
+  // Registra una pausa una sola vez por UUID y conserva nombre y colegio como datos históricos.
   if (path === '/api/activity' && req.method === 'POST') {
     if (user.role !== 'teacher') fail(403, 'Solo los docentes pueden registrar sus pausas.')
     const body = await json(req)
@@ -388,6 +424,7 @@ async function api(req, res, url) {
     db.prepare('INSERT INTO activity_records(id,teacher_id,teacher_name,teacher_ref,school,minutes,performed_on,video_id) VALUES(?,?,?,?,?,?,?,?)').run(id, teacher.id, teacher.name, teacher.id, teacher.school, body.minutes, date, body.video_id || null)
     return send(res, 201, { id })
   }
+  // Consulta colegios locales o remotos; restringe el resultado según el perfil.
   if (path === '/api/schools' && req.method === 'GET') {
     if (!supabaseConfigured()) return send(res, 200, { schools: user.role === 'admin' ? db.prepare('SELECT * FROM schools ORDER BY name').all() : db.prepare('SELECT * FROM schools WHERE name=?').all(user.school) })
     await syncStoredSchools()
@@ -411,6 +448,7 @@ async function api(req, res, url) {
       throw error
     }
   }
+  // La creación y consulta general de usuarios está reservada al administrador.
   if (path === '/api/users') {
     if (user.role !== 'admin') fail(403, 'Solo el administrador puede gestionar usuarios.')
     if (req.method === 'GET') return send(res, 200, { users: db.prepare('SELECT id,name,email,role,school FROM users ORDER BY name').all() })
@@ -426,6 +464,7 @@ async function api(req, res, url) {
   if (path === '/api/teachers' && req.method === 'GET' && user.role === 'school') {
     return send(res, 200, { teachers: db.prepare("SELECT u.id,u.name,u.email,u.school,(SELECT COALESCE(SUM(minutes),0) FROM activity_records a WHERE a.teacher_id=u.id AND a.school=u.school) AS minutes,(SELECT COUNT(*) FROM activity_records a WHERE a.teacher_id=u.id AND a.school=u.school) AS session_count,(SELECT COUNT(*) FROM videos v WHERE v.teacher_id=u.id) AS video_count FROM users u WHERE role='teacher' AND school=? ORDER BY name").all(user.school) })
   }
+  // Gestiona docentes y sincroniza perfiles remotos; al eliminar una cuenta también limpia sus videos.
   if (path.startsWith('/api/teachers')) {
     if (user.role !== 'admin') fail(403, 'Solo el administrador puede gestionar docentes.')
     if (path === '/api/teachers' && req.method === 'GET') return send(res, 200, { teachers: db.prepare("SELECT u.id,u.name,u.email,u.school,u.created_at,(SELECT COUNT(*) FROM videos v WHERE v.teacher_id=u.id) AS video_count,(SELECT COUNT(*) FROM activity_records a WHERE a.teacher_id=u.id) AS session_count,(SELECT COALESCE(SUM(minutes),0) FROM activity_records a WHERE a.teacher_id=u.id) AS minutes FROM users u WHERE u.role='teacher' ORDER BY u.created_at DESC,u.name").all() })
@@ -459,6 +498,7 @@ async function api(req, res, url) {
       return send(res, 200, { ok: true })
     }
   }
+  // Biblioteca compartida de videos con los datos de su docente autor.
   if (path === '/api/videos' && req.method === 'GET') return send(res, 200, { videos: db.prepare('SELECT v.*,u.name AS teacher_name FROM videos v JOIN users u ON u.id=v.teacher_id ORDER BY v.created_at DESC,v.rowid DESC').all() })
   if (path === '/api/videos' && req.method === 'POST') {
     if (user.role !== 'teacher') fail(403, 'Solo los docentes pueden agregar videos.')
@@ -469,6 +509,7 @@ async function api(req, res, url) {
     db.prepare('INSERT INTO videos(id,teacher_id,title,description,category,url) VALUES(?,?,?,?,?,?)').run(id, user.id, details.title, details.description, details.category, videoUrl)
     return send(res, 201, { id })
   }
+  // Recibe datos binarios con límite de 100 MB y verifica la firma del archivo antes de registrarlo.
   if (path === '/api/videos/upload' && req.method === 'POST') {
     if (user.role !== 'teacher') fail(403, 'Solo los docentes pueden agregar videos.')
     const details = videoDetails(Object.fromEntries(url.searchParams))
@@ -499,6 +540,7 @@ async function api(req, res, url) {
     closeSync(fd)
     return send(res, 201, { id })
   }
+  // Sirve videos locales con soporte de rangos de bytes para adelantar o reanudar la reproducción.
   const fileId = path.match(/^\/api\/videos\/([\w-]+)\/file$/)?.[1]
   if (fileId && req.method === 'GET') {
     const video = db.prepare('SELECT * FROM videos WHERE id=?').get(fileId)
@@ -521,6 +563,7 @@ async function api(req, res, url) {
     res.on('close', () => stream.destroy())
     return stream.pipe(res)
   }
+  // La eliminación de videos está restringida al docente propietario.
   const videoId = path.match(/^\/api\/videos\/([\w-]+)$/)?.[1]
   if (videoId && req.method === 'DELETE') {
     const video = db.prepare('SELECT * FROM videos WHERE id=?').get(videoId)
@@ -533,6 +576,7 @@ async function api(req, res, url) {
   fail(404, 'Recurso no encontrado.')
 }
 
+// Atiende la API y los archivos compilados; centraliza errores y cabeceras de respuesta.
 const server = createServer(async (req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff')
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
@@ -541,6 +585,7 @@ const server = createServer(async (req, res) => {
     if (url.pathname.startsWith('/api/')) return await api(req, res, url)
     if (!['GET', 'HEAD'].includes(req.method)) fail(405, 'Método no permitido.')
     const dist = join(root, 'dist')
+    // Comprueba que la ruta solicitada permanezca dentro de dist para impedir acceso a otros archivos.
     const target = resolve(dist, '.' + decodeURIComponent(url.pathname))
     if (!target.startsWith(dist + '/') && !target.startsWith(dist + '\\') && target !== dist) fail(404, 'Recurso no encontrado.')
     const file = existsSync(target) && statSync(target).isFile() ? target : join(dist, 'index.html')
@@ -554,4 +599,5 @@ const server = createServer(async (req, res) => {
     send(res, error.status || 500, { error: error.status ? error.message : 'No se pudo completar la operación.' })
   }
 })
+// Inicia la escucha con host y puerto configurables mediante variables de entorno.
 server.listen(Number(process.env.PORT || 3001), process.env.HOST || '127.0.0.1', () => console.log(`Escuela API: http://127.0.0.1:${server.address().port}`))

@@ -16,16 +16,12 @@ En el primer inicio completa **Configura tu escuela** con el nombre de la escuel
 ## Perfiles
 
 - **Colegio:** consulta únicamente los docentes afiliados a su institución y sus resúmenes de minutos y sesiones; no crea usuarios ni modifica docentes.
-- **Administrador:** crea colegios y usuarios con perfiles de administrador, colegio o docente desde **Colegios y usuarios**; consulta también las rutinas privadas y puede editarlas. consulta minutos y sesiones por institución y profesor; agrega docentes con nombre, colegio, correo y contraseña; puede corregir su nombre y colegio. Al eliminar un docente se revocan sus sesiones de acceso y se eliminan sus videos y archivos, conservando las pausas realizadas en el reporte histórico.
+- **Administrador:** crea colegios y usuarios con perfiles de administrador, colegio o docente desde **Colegios y usuarios**; crea rutinas, consulta también las privadas y puede editarlas. Consulta minutos y sesiones por institución y profesor; agrega docentes con nombre, colegio, correo y contraseña; puede corregir su nombre y colegio. Al eliminar un docente se revocan sus sesiones de acceso y se eliminan sus videos y archivos, conservando las pausas realizadas en el reporte histórico.
 - **Docente:** ingresa con las credenciales entregadas por el administrador; consulta la biblioteca compartida, filtra por categoría, busca por título o autor y publica videos. Puede eliminar únicamente sus propios videos. Consulta sus minutos y sesiones en el resumen personal y registra las pausas que ha realizado.
 
 Para probar los perfiles, crea un docente desde el administrador, cierra sesión e ingresa con su correo y contraseña. Cada cuenta tiene su perfil asignado por el servidor.
 
 ## Videos
-
-El resumen principal de ambos perfiles incluye un video de bienvenida con efecto de dibujo animado y controles de reproducción, sin reproducción automática. El MP4 y su portada están en `public/videos/bienvenida-animada.*`. Conserva el audio del archivo original. Es una estilización del video original mediante suavizado de colores y contornos; conserva su movimiento y duración.
-
-Para volver a procesarlo, `scripts/cartoonize-video.py` recibe el archivo original, el MP4 de destino y la portada JPG. Requiere Python con `numpy`, `opencv-python-headless` e `imageio-ffmpeg`. Estas herramientas solo se usan para preparar el video; no son necesarias para ejecutar la aplicación.
 
 - Archivos MP4 o WebM de hasta 100 MB, guardados en el servidor.
 - Enlaces HTTPS de YouTube, Vimeo o archivos directos MP4/WebM.
@@ -57,7 +53,7 @@ npm start
 
 El servidor sirve la aplicación compilada y la API desde http://127.0.0.1:3001. `npm run preview` solo previsualiza el frontend y no reemplaza al servidor completo.
 
-Para acceso desde otros equipos configura `HOST=0.0.0.0` y, para publicación, un proxy HTTPS y `COOKIE_SECURE=true`. Las variables se definen en el entorno del proceso (no se carga un archivo `.env` automáticamente). `PORT` cambia el puerto de producción y `DATA_DIR` cambia la carpeta de datos. En desarrollo el proxy de Vite apunta al puerto 3001.
+Para acceso desde otros equipos configura `HOST=0.0.0.0` y, para publicación, un proxy HTTPS y `COOKIE_SECURE=true`. Los comandos `npm run dev`, `npm run dev:server`, `npm start` y `npm run check:supabase` cargan `.env` si existe. `PORT` cambia el puerto de producción y `DATA_DIR` cambia la carpeta de datos. En desarrollo el proxy de Vite apunta al puerto 3001.
 
 ## Verificar
 
@@ -72,20 +68,22 @@ Las pruebas de integración usan un directorio temporal y verifican configuraci�
 
 - `server/index.js`: API, autenticación, SQLite, archivos y servidor de producción.
 - `server/supabase.js`: consultas del backend a Supabase durante la migración.
-- `supabase/schema.sql`: esquema inicial de tablas para Supabase.
 - `server/index.test.js`: pruebas de integración.
 - `scripts/dev.mjs`: inicio conjunto de Vite y API.
+- `scripts/check-supabase.mjs`: comprobación manual de conexión con Supabase.
 - `src/views/AuthView.vue`: configuración inicial e inicio de sesión.
 - `src/views/DashboardView.vue`: panel según el perfil de la cuenta.
 - `src/components/TeacherManager.vue`: alta y eliminación de docentes.
 - `src/components/VideoLibrary.vue`: biblioteca, filtros, reproducción y eliminación.
 - `src/components/VideoForm.vue`: publicación de enlaces y archivos.
-- `src/components/WelcomeVideo.vue`: video de bienvenida del resumen principal.
 - `src/components/ActivityForm.vue`: registro de pausas realizadas.
 - `src/components/ActivityDashboard.vue`: estadísticas personales y reportes por institución.
+- `src/components/RoutineCommunity.vue`: comunidad y editor de rutinas.
 - `src/components/ui/`: iconos, diálogos y controles reutilizables.
 - `src/services/api.js`: cliente de la API.
 - `src/style.css`: diseño adaptable a escritorio y móvil.
+
+`node_modules/` contiene las dependencias instaladas con `npm install`. `dist/` contiene la versión de producción generada con `npm run build`; no se edita directamente. `data/` conserva la base de datos y los videos subidos, por lo que debe mantenerse y respaldarse.
 
 ## Rutinas
 

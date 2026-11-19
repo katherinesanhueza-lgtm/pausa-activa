@@ -1,3 +1,4 @@
+// Diagnóstico manual: comprueba las variables del backend y el acceso REST al catálogo de colegios.
 const { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY } = process.env
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
@@ -6,6 +7,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   process.exit(1)
 }
 
+// Valida la URL antes de enviar las credenciales del servidor.
 let baseUrl
 try {
   baseUrl = new URL(SUPABASE_URL)
@@ -17,6 +19,7 @@ try {
   process.exit(1)
 }
 
+// Consulta solo un identificador para verificar la conexión sin descargar todo el catálogo.
 const endpoint = new URL('/rest/v1/schools?select=id&limit=1', baseUrl)
 try {
   const response = await fetch(endpoint, {
